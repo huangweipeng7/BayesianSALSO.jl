@@ -51,7 +51,7 @@ res.n_runs, res.n_scans, res.n_zealous_accepts, res.n_zealous_attempts
 | `prob_sequential_allocation` | 0.5 | greedy initialiser versus a random start |
 | `max_scans` | `typemax(Int)` | sweeps per run |
 | `seconds` | `Inf` | soft budget for the whole call, checked between runs |
-| `rng` | `default_rng()` | e.g. `MersenneTwister(42)` for a reproducible search |
+| `rng` | `default_rng()` | e.g. `MersenneTwister(42)` to repeat a search (identical for the same Julia version and CPU) |
 
 `seconds` is the one option whose effect is not reproducible from `rng`: once the
 budget is spent, no further run of the `n_runs` is started and the best one so far is
