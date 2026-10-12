@@ -182,6 +182,8 @@ Expected N-invariant Binder loss of `labels` from the PSM, on the same scale as 
 `salso`.  Items labelled 0 are unassigned and skipped."""
 function expected_loss(labels::Vector{Int}, psm::Matrix{Float64}, loss::BinderLoss)
     n = length(labels)
+    size(psm) == (n, n) ||
+        throw(DimensionMismatch("psm is $(size(psm)), but labels has $n items"))
     a = loss.a
     two_minus_a = loss.two_minus_a
     eloss = 0.0
@@ -216,6 +218,8 @@ unassigned: each becomes its own singleton row and contributes nothing."""
 function expected_loss(labels::Vector{Int}, draws::Matrix{Int}, loss::VILoss)
     n = length(labels)
     B = size(draws, 1)
+    size(draws, 2) == n ||
+        throw(DimensionMismatch("draws has $(size(draws, 2)) items, but labels has $n"))
 
     canon = _canonicalize(labels)
     K = maximum(canon)
@@ -491,7 +495,7 @@ function _vi_reset!(s::_VIState, labels::AbstractVector{Int})
 end
 
 """Move item i to cluster t (t = 0 marks it unassigned).  O(B)."""
-function _vi_assign!(s::_VIState, i::Int, t::Int)
+@inline function _vi_assign!(s::_VIState, i::Int, t::Int)
     f = s.labels[i]
     f == t && return
     if f != 0
@@ -517,7 +521,7 @@ function _vi_surrogate(s::_VIState, i::Int, cand::AbstractVector{Int})
     @inbounds for (idx, t) in enumerate(cand)
         off = (t == c) ? 1 : 0
         acc = (2.0 - s.a) * s.B * s.delta[Int(s.n_of[t])-off+1]
-        for b = 1:s.B
+        @inbounds for b = 1:s.B
             acc -= 2.0 * s.delta[Int(s.conf[t, s.D[b, i], b])-off+1]
         end
         vals[idx] = acc
@@ -543,14 +547,14 @@ end
 
 function _vi_occupied(s::_VIState)
     out = Int[]
-    for t = 1:s.K_max
+    @inbounds for t = 1:s.K_max
         s.n_of[t] > 0 && push!(out, t)
     end
     return out
 end
 
 """Smallest unused cluster label, or `nothing` when the ceiling is reached."""
-function _vi_empty_label(s::_VIState)
+@inline function _vi_empty_label(s::_VIState)
     for t = 1:s.K_max
         s.n_of[t] == 0 && return t
     end
@@ -582,7 +586,7 @@ function _vi_best_target(s::_VIState, i::Int)
         t = occ[idx]
         off = (t == c) ? 1 : 0
         acc = (2.0 - s.a) * s.B * s.delta[Int(s.n_of[t])-off+1]
-        for b = 1:s.B
+        @inbounds for b = 1:s.B
             acc -= 2.0 * s.delta[Int(s.conf[t, s.D[b, i], b])-off+1]
         end
         vals[idx] = acc
@@ -628,12 +632,12 @@ struct _BinderSearch
 end
 
 """Binder reallocation step: move item `i` to the cluster minimising `_eloss`."""
-function _binder_sweeten_step(s::_BinderSearch, labels, i::Int)
+@inline function _binder_sweeten_step(s::_BinderSearch, labels, i::Int)
     return _salso_move_item!(labels, i, s.psm, s.draws, s.loss, s.K_max)
 end
 
 """VI reallocation step: move item `i` to its best target cluster."""
-function _vi_sweeten_step(s::_VIState, labels, i::Int)
+@inline function _vi_sweeten_step(s::_VIState, labels, i::Int)
     t = _vi_best_target(s, i)
     t == labels[i] && return false
     _vi_assign!(s, i, t)
@@ -841,6 +845,35 @@ function _salso_search(
 end
 
 """
+    _check_salso_kwargs!(; n_runs, max_zealous_attempts, max_n_clusters,
+                           max_scans, seconds, prob_sequential_allocation)
+
+Check `salso`'s keyword arguments up front, so an impossible value gives a clear
+`ArgumentError` instead of a mid-search failure.
+"""
+function _check_salso_kwargs!(;
+    n_runs::Integer,
+    max_zealous_attempts::Integer,
+    max_n_clusters::Integer,
+    max_scans::Integer,
+    seconds::Real,
+    prob_sequential_allocation::Real,
+)
+    n_runs > 0 || throw(ArgumentError("n_runs must be > 0, got $n_runs"))
+    max_zealous_attempts ≥ 0 ||
+        throw(ArgumentError("max_zealous_attempts must be ≥ 0, got $max_zealous_attempts"))
+    max_n_clusters ≥ 0 ||
+        throw(ArgumentError("max_n_clusters must be ≥ 0, got $max_n_clusters"))
+    max_scans > 0 || throw(ArgumentError("max_scans must be > 0, got $max_scans"))
+    seconds > 0 || throw(ArgumentError("seconds must be > 0, got $seconds"))
+    0 ≤ prob_sequential_allocation ≤ 1 ||
+        throw(ArgumentError(
+            "prob_sequential_allocation must be in [0, 1], got $prob_sequential_allocation",
+        ))
+    return nothing
+end
+
+"""
     salso(draws::Matrix{Int}; loss = VILoss(), n_runs = 16,
           max_zealous_attempts = 10, max_n_clusters = 0,
           prob_sequential_allocation = 0.5, max_scans = typemax(Int),
@@ -851,19 +884,42 @@ greedy searches, of which the smallest expected `loss` wins.  `max_n_clusters = 
 uses the largest number of labels seen in a draw, as R's `salso` does;
 `prob_sequential_allocation` is the probability of the greedy initialiser versus a
 random start; `max_scans`, `max_zealous_attempts` and `seconds` bound each run.
-Each loss has its own search driver."""
+Each loss has its own search driver.
+
+The values are checked up front: `n_runs > 0`, `max_scans > 0`, `seconds > 0`,
+`prob_sequential_allocation ∈ [0, 1]`, and non-negative counts."""
 function salso(
     draws::Matrix{Int};
     loss::SALSOLoss = VILoss(),
-    n_runs::Int = 16,
-    max_zealous_attempts::Int = 10,
-    max_n_clusters::Int = 0,
-    prob_sequential_allocation::Float64 = 0.5,
-    max_scans::Int = typemax(Int),
-    seconds::Float64 = Inf,
+    n_runs::Integer = 16,
+    max_zealous_attempts::Integer = 10,
+    max_n_clusters::Integer = 0,
+    prob_sequential_allocation::Real = 0.5,
+    max_scans::Integer = typemax(Int),
+    seconds::Real = Inf,
     rng = default_rng(),
 )
     B, n = size(draws)
+
+    (B == 0 || n == 0) && throw(
+        ArgumentError(
+            "draws must be a B × n matrix with at least one draw and one item, got $(size(draws))",
+        ),
+    )
+
+    _check_salso_kwargs!(;
+        n_runs = n_runs, max_zealous_attempts = max_zealous_attempts,
+        max_n_clusters = max_n_clusters, max_scans = max_scans, seconds = seconds,
+        prob_sequential_allocation = prob_sequential_allocation,
+    )
+    # the drivers below are typed, and integers of any width (or e.g. `1 // 2`)
+    # are accepted above
+    n_runs = Int(n_runs)
+    max_zealous_attempts = Int(max_zealous_attempts)
+    max_n_clusters = Int(max_n_clusters)
+    max_scans = Int(max_scans)
+    seconds = Float64(seconds)
+    prob_sequential_allocation = Float64(prob_sequential_allocation)
 
     if max_n_clusters ≤ 0
         max_n_clusters = maximum(maximum(_canonicalize(@view draws[b, :])) for b = 1:B)

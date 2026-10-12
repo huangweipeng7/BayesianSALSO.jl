@@ -37,7 +37,7 @@ function _confusion(C₁::Vector{Int}, C₂::Vector{Int})
         counts1 = vec(sum(ct, dims = 2))
         counts2 = vec(sum(ct, dims = 1))
         cells = Tuple{Int,Int,Int}[]
-        for i = 1:k1, j = 1:k2
+        @inbounds for i = 1:k1, j = 1:k2
             ct[i, j] == 0 && continue
             push!(cells, (i, j, ct[i, j]))
         end
@@ -190,5 +190,5 @@ function purity(C₁::Vector{Int}, C₂::Vector{Int})::Float64
 end
 
 """Number of non-empty clusters in one draw (labels `≤ 0` count as unassigned)."""
-@inline count_cluster(draw::AbstractVector{<:Integer}) =
+@inline count_cluster(draw::AbstractVector) =
     length(unique(filter(>(0), _as_int_labels(draw))))

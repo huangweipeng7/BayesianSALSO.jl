@@ -60,7 +60,8 @@ the optimum may lie outside the region searched.
 
 The pairwise metrics `ari`, `vi`, `nmi`, `purity`, `binder_loss`,
 `binder_loss_n_invariant`, `compute_psm` and `expected_loss` are exported as well,
-for scoring an estimate against a reference partition.
+for scoring an estimate against a reference partition, plus `count_cluster` for the
+number of clusters in a single draw.
 
 ## Command line
 

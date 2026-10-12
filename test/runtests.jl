@@ -398,8 +398,8 @@ end
     )
     @test res1.n_runs == 1
     # a search that never starts must not return a garbage result
-    @test_throws ErrorException salso(draws; loss = VILoss(1.0), n_runs = 0)
-    @test_throws ErrorException salso(
+    @test_throws ArgumentError salso(draws; loss = VILoss(1.0), n_runs = 0)
+    @test_throws ArgumentError salso(
         draws;
         loss = VILoss(1.0),
         n_runs = 2,
@@ -517,10 +517,29 @@ end
     draws = rand(MersenneTwister(16), 1:4, 30, 10)
     @test_throws ArgumentError salso(draws[1, :]; n_runs = 2)                 # one draw
     @test_throws ArgumentError salso([draws[b, :] for b = 1:3]; n_runs = 2)   # vector of draws
-    # the loss keyword is typed, so a string or `nothing` is a TypeError
+    # a string or `nothing` is not a SALSOLoss, so dispatch turns it into a TypeError
     @test_throws TypeError salso(draws; loss = "vi", n_runs = 2)
     @test_throws TypeError salso(draws; loss = nothing, n_runs = 2)
+    # keyword arithmetic and bounds: invalid numbers are clear errors
+    @test_throws ArgumentError salso(draws; loss = VILoss(1.0), n_runs = -1)
+    @test_throws ArgumentError salso(draws; loss = VILoss(1.0), max_scans = -1)
+    @test_throws ArgumentError salso(draws; loss = VILoss(1.0),
+        prob_sequential_allocation = 1.5)
+    # a zero budget is refused too, with the same error as a negative one
+    @test_throws ArgumentError salso(draws; loss = VILoss(1.0), max_scans = 0)
+    @test_throws ArgumentError salso(draws; loss = VILoss(1.0), n_runs = 2, seconds = 0.0)
+    @test_throws ArgumentError salso(draws; loss = VILoss(1.0),
+        prob_sequential_allocation = NaN)
     @test_throws MethodError salso(draws; nonsense = 1)                       # unknown option
+    # empty inputs are refused with a clear message
+    @test_throws ArgumentError salso(zeros(Int, 3, 0); loss = VILoss(1.0), n_runs = 2)
+    @test_throws ArgumentError salso(zeros(Int, 0, 3); loss = VILoss(1.0), n_runs = 2)
+    # but a whole number is not a mistake: `seconds = 10` and narrow integers work
+    @test salso(draws; loss = VILoss(1.0), n_runs = 2, seconds = 10) isa SALSOResult
+    @test salso(draws; loss = VILoss(1.0), n_runs = Int32(2), max_scans = Int16(50)) isa
+          SALSOResult
+    @test salso(draws; loss = VILoss(1.0), n_runs = 2, prob_sequential_allocation = 1 // 2) isa
+          SALSOResult
 end
 
 @testset "integers of any width are accepted" begin
@@ -559,5 +578,11 @@ end
     @test purity(truth, [1, 2, 1, 2, 3, 3]) == 4 / 6
     @test binder_loss([1, 1, 2], [1, 2, 2]; a = 1.0, b = 1.0) == 2.0
     @test binder_loss_n_invariant([1, 1, 2], [1, 2, 2]; a = 1.0, b = 1.0) ≈ 4 / 9
-    @test SALSO.count_cluster([1, 2, 2, 0]) == 2
+    # exported, and it validates labels like everything else
+    @test count_cluster([1, 2, 2, 0]) == 2
+    @test count_cluster(Int8[1, 1, 2]) == 2
+    @test_throws ArgumentError count_cluster([1.0, 2.0])
+    # a loss needs the labels and the partition it scores to match
+    @test_throws DimensionMismatch expected_loss([1, 2], ones(3, 3), BinderLoss(1.0))
+    @test_throws DimensionMismatch expected_loss([1, 2], ones(Int, 4, 5), VILoss(1.0))
 end

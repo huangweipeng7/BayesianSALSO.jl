@@ -33,7 +33,7 @@ module SALSO
 export SALSOLoss, BinderLoss, VILoss
 export salso, SALSOResult
 export compute_psm, expected_loss
-export binder_loss, binder_loss_n_invariant, ari, vi, nmi, purity
+export binder_loss, binder_loss_n_invariant, ari, vi, nmi, purity, count_cluster
 
 using Clustering: randindex, varinfo
 
