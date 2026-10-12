@@ -1,0 +1,16 @@
+# A package is resolved from its Project.toml; the manifest is environment
+# state, regenerated on `Pkg.instantiate()`.  Committing a stale one is what
+# made this repository fail to instantiate.
+Manifest.toml
+
+# scratch output of the demo script
+test_part.csv
+
+# Julia
+*.jl.cov
+*.jl.*.cov
+*.jl.mem
+
+# editors / OS
+.DS_Store
+*~
