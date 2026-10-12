@@ -93,10 +93,10 @@ compute_psm(draws::AbstractMatrix) = _label_type_error(draws)
 
 # ─── loss constructors ───────────────────────────────────────────────────────
 
-# `BinderLoss(1)` / `VILoss(0)` are natural things to write; the algorithm's
-# constructors take `Float64`, so widen them rather than making the caller guess.
-BinderLoss(a::Integer) = BinderLoss(Float64(a))
-VILoss(a::Integer) = VILoss(Float64(a))
+# `BinderLoss(1)`, `VILoss(0.5f0)`, `VILoss(1 // 2)` are all natural things to
+# write; the algorithm's constructors take `Float64`, so widen them.
+BinderLoss(a::Real) = BinderLoss(Float64(a))
+VILoss(a::Real) = VILoss(Float64(a))
 
 # ─── pairwise metrics ────────────────────────────────────────────────────────
 #

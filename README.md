@@ -27,7 +27,7 @@ Julia 1.10 or newer.
 ```julia
 using SALSO
 
-# draws[b, i] is the label of item i in draw b: integers, 0 means unassigned
+# draws[b, i] is the label of item i in draw b: integers, 0 = in no cluster
 draws = [ 1 2 1 3 3 ;   # draw 1
           1 2 2 3 3 ;   # draw 2
           1 2 2 3 1 ]   # draw 3

@@ -558,6 +558,8 @@ end
     @test (@allocated pack()) < 6000      # one Vector{Int} (4000 B), not two
     @test VILoss(1).a == 1.0
     @test BinderLoss(1).two_minus_a == 1.0
+    @test VILoss(1 // 2).a == 0.5         # any Real, not just Float64/Int
+    @test BinderLoss(0.5f0).a == 0.5
 end
 
 @testset "metrics" begin
@@ -567,6 +569,11 @@ end
     @test binder_loss_n_invariant(Int[], Int[]) == 0.0
     @test binder_loss([1], [1]) == 0.0
     @test purity(Int[], Int[]) == 1.0
+    # ari and vi go through Clustering, which cannot take empty vectors
+    @test ari(Int[], Int[]) == 1.0
+    @test vi(Int[], Int[]) == 0.0
+    @test_throws DimensionMismatch ari([1, 2], [1])
+    @test_throws DimensionMismatch vi([1, 2], [1])
     # labels need not be 1..K, or even positive
     c1 = [-3, -3, 7, 7]
     c2 = [5, 5, -1, -1]

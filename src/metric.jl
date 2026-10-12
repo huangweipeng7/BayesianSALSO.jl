@@ -122,19 +122,28 @@ end
     ari(C₁, C₂) -> Float64
 
 Adjusted Rand index (Hubert & Arabie, 1985) between two label vectors, via
-`Clustering.randindex`.  `1.0` is perfect agreement and `≈ 0` is chance level;
-the label values themselves are irrelevant, only the partition matters.
+`Clustering.randindex`.  `1.0` is perfect agreement (also for two empty vectors)
+and `≈ 0` is chance level; the label values are irrelevant, only the partition
+matters.
 """
-@inline ari(C₁::Vector{Int}, C₂::Vector{Int}) = randindex(C₁, C₂) |> first
+@inline function ari(C₁::Vector{Int}, C₂::Vector{Int})
+    length(C₁) == length(C₂) ||
+        throw(DimensionMismatch("partitions of $(length(C₁)) and $(length(C₂)) items"))
+    return isempty(C₁) ? 1.0 : randindex(C₁, C₂) |> first
+end
 
 """
     vi(C₁, C₂) -> Float64
 
 `H(C₁) + H(C₂) - 2 I(C₁, C₂)` (Meilă, 2003), in nats and normalised by the number
-of items, via `Clustering.varinfo`; `0.0` is perfect agreement.  The objective SALSO
-minimises is [`VILoss`](@ref).
+of items, via `Clustering.varinfo`; `0.0` is perfect agreement (also for two empty
+vectors).  The objective SALSO minimises is [`VILoss`](@ref).
 """
-@inline vi(C₁::Vector{Int}, C₂::Vector{Int}) = varinfo(C₁, C₂)
+@inline function vi(C₁::Vector{Int}, C₂::Vector{Int})
+    length(C₁) == length(C₂) ||
+        throw(DimensionMismatch("partitions of $(length(C₁)) and $(length(C₂)) items"))
+    return isempty(C₁) ? 0.0 : varinfo(C₁, C₂)
+end
 
 """
     nmi(C₁, C₂) -> Float64
