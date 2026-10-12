@@ -105,7 +105,7 @@ VILoss(a::Integer) = VILoss(Float64(a))
 
 """Validate label vectors and pack them as `Vector{Int}` for the metrics."""
 function _metric_labels(labels::AbstractVector)
-    _as_int_labels(labels)
+    labels = _as_int_labels(labels)     # validates, and converts once when needed
     return labels isa Vector{Int} ? labels : collect(Int, labels)
 end
 

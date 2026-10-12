@@ -550,6 +550,12 @@ end
           reference
     @test expected_loss(Int8.(draws[1, :]), draws, VILoss(1.0)) isa Float64
     @test ari(Int8[1, 2, 1, 2], Int16[1, 2, 1, 2]) == 1.0
+    # a narrow label vector is converted once, not once for validation and again
+    # for the metrics themselves
+    narrow = Int32.(mod1.(1:500, 7))
+    pack() = SALSO._metric_labels(narrow)
+    pack()
+    @test (@allocated pack()) < 6000      # one Vector{Int} (4000 B), not two
     @test VILoss(1).a == 1.0
     @test BinderLoss(1).two_minus_a == 1.0
 end
