@@ -50,8 +50,13 @@ res.n_runs, res.n_scans, res.n_zealous_accepts, res.n_zealous_attempts
 | `max_n_clusters` | 0 | cluster ceiling; 0 uses the largest count seen in a draw, as R's `salso` does |
 | `prob_sequential_allocation` | 0.5 | greedy initialiser versus a random start |
 | `max_scans` | `typemax(Int)` | sweeps per run |
-| `seconds` | `Inf` | wall-clock budget per run |
+| `seconds` | `Inf` | soft budget for the whole call, checked between runs |
 | `rng` | `default_rng()` | e.g. `MersenneTwister(42)` for a reproducible search |
+
+`seconds` is the one option whose effect is not reproducible from `rng`: once the
+budget is spent, no further run of the `n_runs` is started and the best one so far is
+returned, so a slower or busier machine simply completes fewer runs.  The default
+`Inf` keeps a search deterministic.
 
 Labels must be integers of any width; floats, strings, boolean masks, a single draw
 vector or a vector of draw vectors raise an `ArgumentError` saying what to pass

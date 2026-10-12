@@ -883,8 +883,11 @@ SALSO point estimate from a `B × n` matrix of cluster labels: `n_runs` independ
 greedy searches, of which the smallest expected `loss` wins.  `max_n_clusters = 0`
 uses the largest number of labels seen in a draw, as R's `salso` does;
 `prob_sequential_allocation` is the probability of the greedy initialiser versus a
-random start; `max_scans`, `max_zealous_attempts` and `seconds` bound each run.
-Each loss has its own search driver.
+random start; `max_scans` and `max_zealous_attempts` bound each run.  `seconds` is a
+soft budget for the whole call, checked between runs: once it is spent, no further
+run is started and the best one so far is returned, so a finite value makes the
+result depend on the machine (the default `Inf` does not).  Each loss has its own
+search driver.
 
 The values are checked up front: `n_runs > 0`, `max_scans > 0`, `seconds > 0`,
 `prob_sequential_allocation ∈ [0, 1]`, and non-negative counts."""
