@@ -191,19 +191,19 @@ function expected_loss(labels::Vector{Int}, psm::Matrix{Float64}, loss::BinderLo
     @inbounds for i = 1:n
         li = labels[i]
         li == 0 && continue                     # unassigned
-        for j = (i+1):n
+        # Mask-and-sum rather than branch: the row is contiguous, so this
+        # vectorises.  `assigned` keeps unassigned items at zero contribution.
+        row_sum = 0.0
+        @simd for j = (i+1):n
             lj = labels[j]
-            lj == 0 && continue                 # unassigned
-            if li == lj
-                # estimate puts i,j together; the draws separate them with
-                # prob 1-psm — the "wrongly clustering" mistake costs 2-a
-                eloss += two_minus_a * (1.0 - psm[i, j])
-            else
-                # estimate separates i,j; the draws put them together with
-                # prob psm — the "wrongly separating" mistake costs a
-                eloss += a * psm[i, j]
-            end
+            assigned = Float64(lj != 0)
+            same = assigned * Float64(lj == li)
+            # same pairs pay 2-a for a separated draw, different pairs pay a
+            # for a joined draw
+            row_sum += same * (two_minus_a - two_minus_a * psm[i, j]) +
+                       (assigned - same) * a * psm[i, j]
         end
+        eloss += row_sum
     end
 
     return 2.0 * eloss / (n * n)
@@ -367,7 +367,8 @@ function _binder_move_deltas(
     end
     # item i leaves its own cluster: drop its diagonal contribution and its count
     from_side =
-        from_k == 0 ? 0.0 : 2.0 * (acc[from_k] - psm[i, i]) - c * (sizes[from_k] - 1)
+        from_k == 0 ? 0.0 :
+        @inbounds 2.0 * (acc[from_k] - psm[i, i]) - c * (sizes[from_k] - 1)
     out = Vector{Float64}(undef, hi)
     inv = 2.0 / (n * n)
     @inbounds for k = 1:hi
@@ -496,17 +497,17 @@ end
 
 """Move item i to cluster t (t = 0 marks it unassigned).  O(B)."""
 @inline function _vi_assign!(s::_VIState, i::Int, t::Int)
-    f = s.labels[i]
+    f = @inbounds s.labels[i]
     f == t && return
     if f != 0
-        s.n_of[f] -= 1
+        @inbounds s.n_of[f] -= 1
         @inbounds for b = 1:s.B
             s.conf[f, s.D[b, i], b] -= 1
         end
     end
-    s.labels[i] = t
+    @inbounds s.labels[i] = t
     if t != 0
-        s.n_of[t] += 1
+        @inbounds s.n_of[t] += 1
         @inbounds for b = 1:s.B
             s.conf[t, s.D[b, i], b] += 1
         end
@@ -538,8 +539,12 @@ function _vi_full_loss(s::_VIState)
     term_c *= (2.0 - s.a)
 
     joint = 0.0
-    @inbounds for b = 1:s.B, l = 1:s.Kb, t = 1:s.K_max
-        joint += s.kern[Int(s.conf[t, l, b])+1]
+    @inbounds for b = 1:s.B, l = 1:s.Kb
+        row = 0.0
+        @simd for t = 1:s.K_max
+            row += s.kern[Int(s.conf[t, l, b])+1]
+        end
+        joint += row
     end
 
     return (term_c + (s.a * s.draw_const - 2.0 * joint) / s.B) / s.n
@@ -555,7 +560,7 @@ end
 
 """Smallest unused cluster label, or `nothing` when the ceiling is reached."""
 @inline function _vi_empty_label(s::_VIState)
-    for t = 1:s.K_max
+    @inbounds for t = 1:s.K_max
         s.n_of[t] == 0 && return t
     end
     return nothing
@@ -567,7 +572,7 @@ when the best surrogate is still positive.  Allocation-free: the candidate list 
 the surrogate values live in the state.
 """
 function _vi_best_target(s::_VIState, i::Int)
-    c = s.labels[i]
+    c = @inbounds s.labels[i]
 
     # occupied clusters, in ascending label order
     occ = s.scratch_occ
@@ -593,14 +598,14 @@ function _vi_best_target(s::_VIState, i::Int)
     end
 
     j = 1
-    bv = vals[1]
+    bv = @inbounds vals[1]
     @inbounds for idx = 2:m
         if vals[idx] < bv
             bv = vals[idx]
             j = idx
         end
     end
-    best = occ[j]
+    best = @inbounds occ[j]
     if bv > 0.0
         e = _vi_empty_label(s)
         e !== nothing && (best = e)
@@ -1207,7 +1212,7 @@ end
 
 """Try to move item i to a better cluster (sweetening scan, Binder fast path)."""
 function _salso_move_item!(labels, i, psm, draws, loss::BinderLoss, K_max)
-    from_k = labels[i]
+    from_k = @inbounds labels[i]
     # Candidates: labels 1:K_current (an empty one acts as a fresh cluster) and
     # K_current+1 while the ceiling allows.
     K_current = maximum(labels)
@@ -1223,10 +1228,10 @@ function _salso_move_item!(labels, i, psm, draws, loss::BinderLoss, K_max)
         end
     end
     if best_k != from_k
-        labels[i] = best_k
+        @inbounds labels[i] = best_k
         return true
     end
-    labels[i] = from_k
+    @inbounds labels[i] = from_k
     return false
 end
 
@@ -1305,7 +1310,7 @@ function _salso_best_move!(
         best_k = maximum(labels) + 1
     end
 
-    labels[i] = best_k
+    @inbounds labels[i] = best_k
     return nothing
 end
 
