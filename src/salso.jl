@@ -312,18 +312,23 @@ depend on `to_k`, which is all the search uses it for."""
             # i is unassigned: only the `to` side contributes (`from_k == 0`
             # would otherwise match every other unassigned item, i.e. label 0).
             @simd for j = 1:length(labels)
-                delta += labels[j] == to_k ? two_minus_a - 2.0 * psm[i, j] : 0.0
+                term = labels[j] == to_k ? two_minus_a - 2.0 * psm[i, j] : 0.0
+                delta += term
             end
         else
             @simd for j = 1:(i-1)
                 lj = labels[j]
-                delta += lj == from_k ? 2.0 * psm[i, j] - two_minus_a :
-                         lj == to_k ? two_minus_a - 2.0 * psm[i, j] : 0.0
+                term =
+                    lj == from_k ? 2.0 * psm[i, j] - two_minus_a :
+                    (lj == to_k ? two_minus_a - 2.0 * psm[i, j] : 0.0)
+                delta += term
             end
             @simd for j = (i+1):length(labels)
                 lj = labels[j]
-                delta += lj == from_k ? 2.0 * psm[i, j] - two_minus_a :
-                         lj == to_k ? two_minus_a - 2.0 * psm[i, j] : 0.0
+                term =
+                    lj == from_k ? 2.0 * psm[i, j] - two_minus_a :
+                    (lj == to_k ? two_minus_a - 2.0 * psm[i, j] : 0.0)
+                delta += term
             end
         end
     end
