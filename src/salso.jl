@@ -304,31 +304,26 @@ depend on `to_k`, which is all the search uses it for."""
         return 0.0
     end
 
-    # Mask-and-sum (branchless, so it vectorises) over the contiguous row; the
-    # two ranges skip item i without a branch inside the loop.
+    # Match only the `from` and `to` labels while scanning the row.  A ternary is
+    # lazy, so most items (neither label) skip the PSM load entirely; `ifelse`
+    # evaluates both sides eagerly and was measured ~5x slower here.
     @inbounds begin
         if from_k == 0
             # i is unassigned: only the `to` side contributes (`from_k == 0`
             # would otherwise match every other unassigned item, i.e. label 0).
             @simd for j = 1:length(labels)
-                delta += ifelse(labels[j] == to_k, two_minus_a - 2.0 * psm[i, j], 0.0)
+                delta += labels[j] == to_k ? two_minus_a - 2.0 * psm[i, j] : 0.0
             end
         else
             @simd for j = 1:(i-1)
                 lj = labels[j]
-                delta += ifelse(
-                    lj == from_k,
-                    2.0 * psm[i, j] - two_minus_a,
-                    ifelse(lj == to_k, two_minus_a - 2.0 * psm[i, j], 0.0),
-                )
+                delta += lj == from_k ? 2.0 * psm[i, j] - two_minus_a :
+                         lj == to_k ? two_minus_a - 2.0 * psm[i, j] : 0.0
             end
             @simd for j = (i+1):length(labels)
                 lj = labels[j]
-                delta += ifelse(
-                    lj == from_k,
-                    2.0 * psm[i, j] - two_minus_a,
-                    ifelse(lj == to_k, two_minus_a - 2.0 * psm[i, j], 0.0),
-                )
+                delta += lj == from_k ? 2.0 * psm[i, j] - two_minus_a :
+                         lj == to_k ? two_minus_a - 2.0 * psm[i, j] : 0.0
             end
         end
     end
