@@ -58,6 +58,12 @@ budget is spent, no further run of the `n_runs` is started and the best one so f
 returned, so a slower or busier machine simply completes fewer runs.  The default
 `Inf` keeps a search deterministic.
 
+The VI search is single-threaded.  The Binder search, and the exported
+`compute_psm`, use Julia's threads to fill the PSM by row, so start Julia with
+`-t auto` or `-t N` for larger inputs.  The row split and exact integer counts keep
+the PSM unchanged by the thread count.  The Binder path stores the full PSM, so its
+memory use is `O(n²)`; very large `n` is better served by `VILoss`.
+
 Labels must be integers of any width; floats, strings, boolean masks, a single draw
 vector or a vector of draw vectors raise an `ArgumentError` saying what to pass
 instead.  The search warns when the estimate lands on the cluster ceiling, where
@@ -73,7 +79,7 @@ number of clusters in a single draw.
 For a CSV holding one row per observation and one column per draw:
 
 ```bash
-julia -t4 ./test/analyze_results.jl \
+julia --project=. -t4 ./test/analyze_results.jl \
     --input_file=./data/test.csv \
     --output_file=./test_part.csv
 ```

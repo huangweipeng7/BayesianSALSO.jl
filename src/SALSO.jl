@@ -36,6 +36,7 @@ export compute_psm, expected_loss
 export binder_loss, binder_loss_n_invariant, ari, vi, nmi, purity, count_cluster
 
 using Clustering: randindex, varinfo
+using Random: default_rng, shuffle!, randperm
 
 include("salso.jl")
 include("interface.jl")

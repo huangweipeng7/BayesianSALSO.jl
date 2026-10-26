@@ -1,4 +1,4 @@
-# ─── Clustering comparison metrics ───────────────────────────────────────────
+# ─── Clustering comparison metrics ────────────────────────────────────────────
 #
 # Pairwise comparison of two partitions: Binder losses, adjusted Rand index,
 # variation of information, normalized mutual information, purity.  The losses
@@ -21,6 +21,8 @@ while it stays small (the usual case, K₁, K₂ ≪ n), else a `Dict`; labels m
 any integers, including negative ones and gaps.
 """
 function _confusion(C₁::Vector{Int}, C₂::Vector{Int})
+    length(C₁) == length(C₂) ||
+        throw(DimensionMismatch("partitions of $(length(C₁)) and $(length(C₂)) items"))
     isempty(C₁) && return Dict{Int,Int}(), Dict{Int,Int}(), Tuple{Int,Int,Int}[]
     lo1, hi1 = extrema(C₁)
     lo2, hi2 = extrema(C₂)
@@ -29,7 +31,7 @@ function _confusion(C₁::Vector{Int}, C₂::Vector{Int})
 
     if k1 * k2 <= _CONTINGENCY_MAX
         ct = zeros(Int, k1, k2)
-        @inbounds for i = eachindex(C₁, C₂)
+        @inbounds for i in eachindex(C₁, C₂)
             ct[C₁[i]-lo1+1, C₂[i]-lo2+1] += 1
         end
         # in the dense case the cell keys are table positions, so the marginals
@@ -47,7 +49,7 @@ function _confusion(C₁::Vector{Int}, C₂::Vector{Int})
     counts1 = Dict{Int,Int}()
     counts2 = Dict{Int,Int}()
     ct = Dict{Tuple{Int,Int},Int}()
-    @inbounds for i = eachindex(C₁, C₂)
+    @inbounds for i in eachindex(C₁, C₂)
         key = (C₁[i], C₂[i])
         ct[key] = get(ct, key, 0) + 1
     end
@@ -80,15 +82,13 @@ Binder loss between two partitions: `a` for every pair of items that `C₁` puts
 together and `C₂` separates (one kind of error), `b` for the pairs that `C₁`
 separates and `C₂` puts together (the other kind).  Lower is better.
 """
-function binder_loss(
-    C₁::Vector{Int}, C₂::Vector{Int}; a::Real = 1.0, b::Real = 1.0)::Float64
+function binder_loss(C₁::Vector{Int}, C₂::Vector{Int}; a::Real = 1.0, b::Real = 1.0)::Float64
     counts1, counts2, cells = _confusion(C₁, C₂)
     both = 0
     for (_, _, m) in cells
         both += m * (m - 1) ÷ 2
     end
-    return float(a) * (_same_pairs(counts1) - both) +
-           float(b) * (_same_pairs(counts2) - both)
+    return float(a) * (_same_pairs(counts1) - both) + float(b) * (_same_pairs(counts2) - both)
 end
 
 """
@@ -99,7 +99,13 @@ and `T` of the two partitions.  Unlike [`binder_loss`](@ref) it does not grow wi
 `n` for a fixed degree of disagreement.
 """
 function binder_loss_n_invariant(
-    c1::Vector{Int}, c2::Vector{Int}; a::Float64 = 1.0, b::Float64 = 1.0)::Float64
+    c1::Vector{Int},
+    c2::Vector{Int};
+    a::Real = 1.0,
+    b::Real = 1.0,
+)::Float64
+    a = float(a)
+    b = float(b)
     n = length(c1)
     counts1, counts2, cells = _confusion(c1, c2)
     inv_n = 1.0 / n
@@ -184,7 +190,7 @@ averaged over clusters: `(1/n)·Σ_j max_i |Cᵢ ∩ C₂ⱼ|`.
 """
 function purity(C₁::Vector{Int}, C₂::Vector{Int})::Float64
     n = length(C₁)
-    n == length(C₂) || error("Partitions must have the same length")
+    n == length(C₂) || throw(DimensionMismatch("partitions of $n and $(length(C₂)) items"))
     n > 0 || return 1.0
     _, _, cells = _confusion(C₁, C₂)
     best = Dict{Int,Int}()          # column label -> largest cell count in it
@@ -198,6 +204,5 @@ function purity(C₁::Vector{Int}, C₂::Vector{Int})::Float64
     return total / n
 end
 
-"""Number of non-empty clusters in one draw (labels `≤ 0` count as unassigned)."""
-@inline count_cluster(draw::AbstractVector) =
-    length(unique(filter(>(0), _as_int_labels(draw))))
+"""Number of non-empty clusters in one draw (label `0` means unassigned)."""
+@inline count_cluster(draw::AbstractVector) = length(unique(filter(!=(0), _as_int_labels(draw))))

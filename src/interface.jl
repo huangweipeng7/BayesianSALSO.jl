@@ -5,9 +5,7 @@
 
 """Error out with an actionable message about non-integer cluster labels."""
 function _label_type_error(labels)
-    kind =
-        labels isa AbstractMatrix ? "matrix" :
-        labels isa AbstractVector ? "vector" : "array"
+    kind = labels isa AbstractMatrix ? "matrix" : labels isa AbstractVector ? "vector" : "array"
     throw(
         ArgumentError(
             "cluster labels must be integers, but this $kind has element type " *
@@ -31,7 +29,7 @@ _as_int_draws(draws::AbstractMatrix{Bool}) = _label_type_error(draws)
 _as_int_draws(draws::AbstractMatrix{<:Integer}) = Matrix{Int}(draws)
 _as_int_draws(draws::AbstractMatrix) = _label_type_error(draws)
 
-# ─── salso ───────────────────────────────────────────────────────────────────
+# ─── salso ────────────────────────────────────────────────────────────────────
 
 """
     salso(draws::AbstractMatrix; loss = VILoss(), kwargs...)
@@ -75,7 +73,7 @@ function salso(draws::AbstractVector; kwargs...)
     return _label_type_error(draws)
 end
 
-# ─── expected_loss / compute_psm ─────────────────────────────────────────────
+# ─── expected_loss / compute_psm ──────────────────────────────────────────────
 # Same treatment as `salso`: validate the labels, accept any integer width.
 
 expected_loss(labels::AbstractVector, psm::Matrix{Float64}, loss::BinderLoss) =
@@ -91,14 +89,14 @@ compute_psm(draws::AbstractMatrix{<:Integer}) = compute_psm(_as_int_draws(draws)
 
 compute_psm(draws::AbstractMatrix) = _label_type_error(draws)
 
-# ─── loss constructors ───────────────────────────────────────────────────────
+# ─── loss constructors ────────────────────────────────────────────────────────
 
 # `BinderLoss(1)`, `VILoss(0.5f0)`, `VILoss(1 // 2)` are all natural things to
 # write; the algorithm's constructors take `Float64`, so widen them.
 BinderLoss(a::Real) = BinderLoss(Float64(a))
 VILoss(a::Real) = VILoss(Float64(a))
 
-# ─── pairwise metrics ────────────────────────────────────────────────────────
+# ─── pairwise metrics ─────────────────────────────────────────────────────────
 #
 # The metrics in `metric.jl` are typed on `Vector{Int}`; accept any integer
 # container, and fail the same way as everywhere else on non-integer labels.
@@ -112,8 +110,7 @@ end
 ari(C₁::AbstractVector, C₂::AbstractVector) = ari(_metric_labels(C₁), _metric_labels(C₂))
 vi(C₁::AbstractVector, C₂::AbstractVector) = vi(_metric_labels(C₁), _metric_labels(C₂))
 nmi(C₁::AbstractVector, C₂::AbstractVector) = nmi(_metric_labels(C₁), _metric_labels(C₂))
-purity(C₁::AbstractVector, C₂::AbstractVector) =
-    purity(_metric_labels(C₁), _metric_labels(C₂))
+purity(C₁::AbstractVector, C₂::AbstractVector) = purity(_metric_labels(C₁), _metric_labels(C₂))
 binder_loss(C₁::AbstractVector, C₂::AbstractVector; kwargs...) =
     binder_loss(_metric_labels(C₁), _metric_labels(C₂); kwargs...)
 binder_loss_n_invariant(C₁::AbstractVector, C₂::AbstractVector; kwargs...) =

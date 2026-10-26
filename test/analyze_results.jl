@@ -10,10 +10,10 @@
 # the labels of `salso`'s winning partition, and a summary is printed.
 #
 # Usage:
-#   julia -t4 test/analyze_results.jl \
+#   julia --project=. -t4 test/analyze_results.jl \
 #       --input_file=data/test.csv --output_file=test_part.csv
 #
-#   julia -t4 test/analyze_results.jl --input_file=draws.csv --output_file=part.csv \
+#   julia --project=. -t4 test/analyze_results.jl --input_file=draws.csv --output_file=part.csv \
 #       --loss=vi --loss_a=0.5 --n_runs=16 --max_zealous=50 --seed=42
 #
 # Options (all of the form `--option=value` or `--option value`):
@@ -64,10 +64,8 @@ function parse_cli(args)
             i <= length(args) || error("option --$key needs a value")
             value = args[i]
         end
-        haskey(opts, key) || error(
-            "unknown option --$key; known options: " *
-            join(sort!(collect(keys(opts))), ", "),
-        )
+        haskey(opts, key) ||
+            error("unknown option --$key; known options: " * join(sort!(collect(keys(opts))), ", "))
         opts[key] = value
         i += 1
     end
@@ -103,14 +101,14 @@ function main(args)
     isempty(opts["output_file"]) && error("--output_file is required")
 
     loss_name = lowercase(opts["loss"])
-    loss_name in ("binder", "vi") ||
-        error("--loss must be binder or vi, got `$(opts["loss"])`")
+    loss_name in ("binder", "vi") || error("--loss must be binder or vi, got `$(opts["loss"])`")
     a = parse(Float64, opts["loss_a"])
     loss = loss_name == "binder" ? BinderLoss(a) : VILoss(a)
 
     # the file is n × B (rows are observations, columns are draws); SALSO wants
     # the B × n transpose, one row per draw
-    labels_by_item = read_labels(opts["input_file"], lowercase(opts["header"]) in ("true", "yes", "1"))
+    labels_by_item =
+        read_labels(opts["input_file"], lowercase(opts["header"]) in ("true", "yes", "1"))
     n, n_draws = size(labels_by_item)
     draws = permutedims(labels_by_item)
     @printf("input    %s: n = %d items, %d draws\n", opts["input_file"], n, n_draws)

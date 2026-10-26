@@ -4,11 +4,7 @@
 # search: sequential-allocation initialisation, sweetening scans, and zealous
 # updates (destroy a cluster, reallocate).
 
-using Random: AbstractRNG, default_rng, shuffle!, randperm
-using LinearAlgebra: Symmetric
-using Statistics: mean
-
-# ─── Part 1: Pairwise Similarity Matrix (PSM) ───
+# ─── Part 1: Pairwise Similarity Matrix (PSM) ─────────────────────────────────
 
 """Scale raw pair counts to fractions and force a unit diagonal, in place."""
 function _psm_normalize!(psm::Matrix{Float64}, n::Int, B::Int)
@@ -36,19 +32,19 @@ const _PSM_PARALLEL_MIN_WORK = 10_000
 const _PSM_CACHE_LINE = 8
 
 """
-Add the co-occurrence counts of draws `b1:b2` to the lower triangle of `psm`.
+Add the co-occurrence counts of all draws to the lower triangle of `psm`.
 
 Items are bucketed by label, so a draw with K_b clusters costs Σ|bucket|²/2 updates
 instead of n²/2.  The counts are exact integers, so the result does not depend on
 the order of accumulation."""
-function _psm_accumulate!(psm::Matrix{Float64}, C_mat::Matrix{Int}, b1::Int, b2::Int, off::Int, K_b::Int)
-    n      = size(C_mat, 2)
+function _psm_accumulate!(psm::Matrix{Float64}, C_mat::Matrix{Int}, off::Int, K_b::Int)
+    n = size(C_mat, 2)
     counts = zeros(Int, K_b + 1)
     starts = Vector{Int}(undef, K_b + 2)
     cursor = Vector{Int}(undef, K_b + 1)
-    order  = Vector{Int}(undef, n)
+    order = Vector{Int}(undef, n)
 
-    @inbounds for b = b1:b2
+    @inbounds for b in axes(C_mat, 1)
         _psm_accumulate_draw!(psm, @view(C_mat[b, :]), off, K_b, counts, starts, cursor, order)
     end
 
@@ -166,8 +162,8 @@ end
 Add the co-occurrence counts of all draws to the rows `r0:r1` of `psm`.
 
 Every draw is bucketed again here (O(n) per draw), because the buckets are what
-turn the O(n²) pair count into Σ|bucket|²/2 updates; the redundant work runs in
-parallel and so does not add to the wall time."""
+turn the O(n²) pair count into Σ|bucket|²/2 updates.  This repeats the bucketing
+for each worker, but the pair updates dominate for the inputs this path targets."""
 function _psm_accumulate_rows!(
     psm::Matrix{Float64},
     C_mat::Matrix{Int},
@@ -180,10 +176,21 @@ function _psm_accumulate_rows!(
     counts = zeros(Int, K_b + 1)
     starts = Vector{Int}(undef, K_b + 2)
     cursor = Vector{Int}(undef, K_b + 1)
-    order  = Vector{Int}(undef, n)
+    order = Vector{Int}(undef, n)
 
     @inbounds for b = 1:size(C_mat, 1)
-        _psm_accumulate_draw_rows!(psm, @view(C_mat[b, :]), off, K_b, counts, starts, cursor, order, r0, r1)
+        _psm_accumulate_draw_rows!(
+            psm,
+            @view(C_mat[b, :]),
+            off,
+            K_b,
+            counts,
+            starts,
+            cursor,
+            order,
+            r0,
+            r1,
+        )
     end
 
     return psm
@@ -196,12 +203,18 @@ The blocks are cut on cache-line boundaries (8 doubles): in a column-major matri
 the rows of a block are 8 bytes apart, so two neighbouring blocks would
 otherwise share the cache lines at their boundary and ping-pong them."""
 function _psm_row_blocks(n::Int, nworkers::Int)
-    blocks = Vector{Tuple{Int,Int}}(undef, nworkers)
     nlines = cld(n, _PSM_CACHE_LINE)          # lines per column
-    per = cld(nlines, nworkers)
+    1 <= nworkers <= nlines ||
+        throw(ArgumentError("need 1 ≤ nworkers ≤ $nlines cache-line blocks, got $nworkers"))
+
+    blocks = Vector{Tuple{Int,Int}}(undef, nworkers)
+    per, extra = divrem(nlines, nworkers)
+    first_line = 0
     @inbounds for w = 1:nworkers
-        l0 = (w - 1) * per
-        l1 = min(w * per, nlines)
+        width = per + (w <= extra)
+        l0 = first_line
+        l1 = l0 + width
+        first_line = l1
         blocks[w] = (l0 * _PSM_CACHE_LINE + 1, min(l1 * _PSM_CACHE_LINE, n))
     end
     return blocks
@@ -237,13 +250,13 @@ function compute_psm(C_mat::Matrix{Int})
         end
     else
         psm = zeros(n, n)
-        _psm_accumulate!(psm, C_mat, 1, B, off, K_b)
+        _psm_accumulate!(psm, C_mat, off, K_b)
     end
 
     return _psm_normalize!(psm, n, B)
 end
 
-# ─── Part 2: Loss Functions ───
+# ─── Part 2: Loss Functions ───────────────────────────────────────────────────
 
 abstract type SALSOLoss end
 
@@ -275,7 +288,7 @@ struct VILoss <: SALSOLoss
     end
 end
 
-# ─── Part 3: Expected Loss Computation ───
+# ─── Part 3: Expected Loss Computation ────────────────────────────────────────
 
 """
     expected_loss(labels, psm, ::BinderLoss) -> Float64
@@ -284,8 +297,7 @@ Expected N-invariant Binder loss of `labels` from the PSM, on the same scale as 
 `salso`.  Items labelled 0 are unassigned and skipped."""
 function expected_loss(labels::Vector{Int}, psm::Matrix{Float64}, loss::BinderLoss)
     n = length(labels)
-    size(psm) == (n, n) ||
-        throw(DimensionMismatch("psm is $(size(psm)), but labels has $n items"))
+    size(psm) == (n, n) || throw(DimensionMismatch("psm is $(size(psm)), but labels has $n items"))
     a = loss.a
     two_minus_a = loss.two_minus_a
     eloss = 0.0
@@ -302,8 +314,8 @@ function expected_loss(labels::Vector{Int}, psm::Matrix{Float64}, loss::BinderLo
             same = assigned * Float64(lj == li)
             # same pairs pay 2-a for a separated draw, different pairs pay a
             # for a joined draw
-            row_sum += same * (two_minus_a - two_minus_a * psm[i, j]) +
-                       (assigned - same) * a * psm[i, j]
+            row_sum +=
+                same * (two_minus_a - two_minus_a * psm[i, j]) + (assigned - same) * a * psm[i, j]
         end
         eloss += row_sum
     end
@@ -369,7 +381,7 @@ function expected_loss(labels::Vector{Int}, draws::Matrix{Int}, loss::VILoss)
         for i = 1:n
             s = canon[i]
             l = ids[i]
-            counts[(s-1)*Kb_cap + l] += 1
+            counts[(s-1)*Kb_cap+l] += 1
             marg[l] += 1
         end
         for l = 1:Kb
@@ -377,9 +389,9 @@ function expected_loss(labels::Vector{Int}, draws::Matrix{Int}, loss::VILoss)
             nl > 0 && (draw_side += a * nl * log2(nl))
         end
         for s = 1:K
-            base = (s-1) * Kb_cap
+            base = (s - 1) * Kb_cap
             for l = 1:Kb
-                m = counts[base + l]
+                m = counts[base+l]
                 m > 0 && (draw_side -= 2 * m * log2(m))
             end
         end
@@ -393,73 +405,15 @@ function expected_loss(labels::Vector{Int}, draws::Matrix{Int}, loss::BinderLoss
     return expected_loss(labels, psm, loss)
 end
 
-# ─── Part 4: Efficient Incremental Delta for Binder Loss ───
-
-"""
-    _binder_delta(labels, psm, i, from_k, to_k, loss) -> Float64
-
-Change in expected Binder loss from moving item `i` from cluster `from_k` to `to_k`,
-on the `expected_loss` scale, in one pass over row `i` of the PSM.  `from_k = 0`
-means `i` is unassigned; there the value is defined up to a constant that does not
-depend on `to_k`, which is all the search uses it for."""
-@inline @fastmath function _binder_delta(
-    labels::Vector{Int},
-    psm::Matrix{Float64},
-    i::Int,
-    from_k::Int,
-    to_k::Int,
-    loss::BinderLoss,
-)
-    a = loss.a
-    two_minus_a = loss.two_minus_a
-    delta = 0.0
-
-    if from_k == to_k
-        return 0.0
-    end
-
-    # Match only the `from` and `to` labels while scanning the row.  A ternary is
-    # lazy, so most items (neither label) skip the PSM load entirely; `ifelse`
-    # evaluates both sides eagerly and was measured ~5x slower here.
-    @inbounds begin
-        if from_k == 0
-            # i is unassigned: only the `to` side contributes (`from_k == 0`
-            # would otherwise match every other unassigned item, i.e. label 0).
-            @simd for j = 1:length(labels)
-                term = labels[j] == to_k ? two_minus_a - 2.0 * psm[i, j] : 0.0
-                delta += term
-            end
-        else
-            @simd for j = 1:(i-1)
-                lj = labels[j]
-                term =
-                    lj == from_k ? 2.0 * psm[i, j] - two_minus_a :
-                    (lj == to_k ? two_minus_a - 2.0 * psm[i, j] : 0.0)
-                delta += term
-            end
-            @simd for j = (i+1):length(labels)
-                lj = labels[j]
-                term =
-                    lj == from_k ? 2.0 * psm[i, j] - two_minus_a :
-                    (lj == to_k ? two_minus_a - 2.0 * psm[i, j] : 0.0)
-                delta += term
-            end
-        end
-    end
-
-    # Same 2/n² normalization as expected_loss.
-    n = length(labels)
-    return 2.0 * delta / (n * n)
-end
+# ─── Part 4: Efficient Incremental Delta for Binder Loss ──────────────────────
 
 """
     _binder_move_deltas(labels, psm, i, from_k, hi, loss) -> Vector{Float64}
 
-`out[k]` is `_binder_delta(labels, psm, i, from_k, k, loss)` for all `k` in `1:hi`,
-from ONE pass over row `i`.  The per-cluster row sums are shared by every candidate,
-so a sweetening scan costs O(n) per item instead of O(n·K) (measured 4.3x at K = 6,
-10x at K = 12).  The sums accumulate in a different order than `_binder_delta`, so
-values agree to rounding rather than bit for bit."""
+`out[k]` is the change in expected Binder loss from moving item `i` from cluster
+`from_k` to each `k` in `1:hi`, from ONE pass over row `i`.  The per-cluster row
+sums are shared by every candidate, so a sweetening scan costs O(n) per item
+instead of O(n·K) (measured 4.3x at K = 6, 10x at K = 12)."""
 function _binder_move_deltas(
     labels::Vector{Int},
     psm::Matrix{Float64},
@@ -481,8 +435,7 @@ function _binder_move_deltas(
     end
     # item i leaves its own cluster: drop its diagonal contribution and its count
     from_side =
-        from_k == 0 ? 0.0 :
-        @inbounds 2.0 * (acc[from_k] - psm[i, i]) - c * (sizes[from_k] - 1)
+        from_k == 0 ? 0.0 : @inbounds 2.0 * (acc[from_k] - psm[i, i]) - c * (sizes[from_k] - 1)
     out = Vector{Float64}(undef, hi)
     inv = 2.0 / (n * n)
     @inbounds for k = 1:hi
@@ -491,7 +444,7 @@ function _binder_move_deltas(
     return out
 end
 
-# ─── Part 5: Incremental expected-VI state ───
+# ─── Part 5: Incremental expected-VI state ────────────────────────────────────
 #
 # `_VIState` keeps the cluster sizes and the confusion table incrementally, so a
 # candidate move costs O(B) instead of rebuilding the K × K_b × B table.  The move
@@ -629,21 +582,6 @@ end
     return
 end
 
-"""One-step change in the expected VI loss for placing item i in each of `cand`."""
-function _vi_surrogate(s::_VIState, i::Int, cand::AbstractVector{Int})
-    c = s.labels[i]
-    vals = Vector{Float64}(undef, length(cand))
-    @inbounds for (idx, t) in enumerate(cand)
-        off = (t == c) ? 1 : 0
-        acc = (2.0 - s.a) * s.B * s.delta[Int(s.n_of[t])-off+1]
-        for b = 1:s.B
-            acc -= 2.0 * s.delta[Int(s.conf[t, s.D[b, i], b])-off+1]
-        end
-        vals[idx] = acc
-    end
-    return vals
-end
-
 """Expected VI loss of the current state, on the same scale as `expected_loss`."""
 function _vi_full_loss(s::_VIState)
     term_c = 0.0
@@ -662,14 +600,6 @@ function _vi_full_loss(s::_VIState)
     end
 
     return (term_c + (s.a * s.draw_const - 2.0 * joint) / s.B) / s.n
-end
-
-function _vi_occupied(s::_VIState)
-    out = Int[]
-    @inbounds for t = 1:s.K_max
-        s.n_of[t] > 0 && push!(out, t)
-    end
-    return out
 end
 
 """Smallest unused cluster label, or `nothing` when the ceiling is reached."""
@@ -737,7 +667,7 @@ function _vi_sequential_allocation!(s::_VIState, rng)
     return s.labels
 end
 
-# ─── Part 6: SALSO Greedy Search ───
+# ─── Part 6: SALSO Greedy Search ──────────────────────────────────────────────
 
 # Both drivers run the same three stages (Dahl et al. 2021, Algorithm 1) and
 # differ only in the state they carry, so the shared loops live here.
@@ -745,14 +675,13 @@ end
 """Immutable inputs of a Binder search (the state itself is the label vector)."""
 struct _BinderSearch
     psm::Matrix{Float64}
-    draws::Matrix{Int}
     loss::BinderLoss
     K_max::Int
 end
 
-"""Binder reallocation step: move item `i` to the cluster minimising `_eloss`."""
+"""Binder reallocation step: move item `i` to the cluster minimising its loss."""
 @inline function _binder_sweeten_step(s::_BinderSearch, labels, i::Int)
-    return _salso_move_item!(labels, i, s.psm, s.draws, s.loss, s.K_max)
+    return _binder_move_item!(labels, i, s.psm, s.loss, s.K_max)
 end
 
 """VI reallocation step: move item `i` to its best target cluster."""
@@ -819,8 +748,7 @@ function _salso_zealous_vi!(s::_VIState, max_zealous_attempts::Int, max_scans::I
 
         n_zscans += _salso_sweeten!(_vi_sweeten_step, s, s.labels, s.n, max_scans, rng)
 
-        _vi_full_loss(s) < eloss_before ?
-            (n_zaccepts += 1) : _vi_reset!(s, old_labels)   # undo
+        _vi_full_loss(s) < eloss_before ? (n_zaccepts += 1) : _vi_reset!(s, old_labels)   # undo
     end
     return n_zaccepts, n_zattempts, n_zscans
 end
@@ -847,17 +775,17 @@ function _salso_zealous_binder!(
         count(==(destroy_k), labels) <= 1 && continue
         n_zattempts += 1
 
-        eloss_before = _eloss(labels, search.psm, search.draws, search.loss)
+        eloss_before = expected_loss(labels, search.psm, search.loss)
         old_labels = copy(labels)
 
-        items_to_move = findall(labels .== destroy_k)
+        items_to_move = findall(==(destroy_k), labels)
         shuffle!(rng, items_to_move)
         @inbounds for i in items_to_move
             labels[i] = 0
         end
 
         for i in items_to_move
-            _salso_best_move!(labels, i, search.psm, search.draws, search.loss, search.K_max, rng)
+            _binder_best_move!(labels, i, search.psm, search.loss, search.K_max)
         end
 
         labels = _canonicalize(labels)
@@ -865,7 +793,7 @@ function _salso_zealous_binder!(
         # Sweeten inside the zealous update before accepting (Alg. 1).
         n_zscans += _salso_sweeten!(_binder_sweeten_step, search, labels, n, max_scans, rng)
 
-        if _eloss(labels, search.psm, search.draws, search.loss) < eloss_before
+        if expected_loss(labels, search.psm, search.loss) < eloss_before
             n_zaccepts += 1
         else
             labels = old_labels
@@ -878,12 +806,12 @@ end
 function _salso_result(best_labels, best_eloss, n_runs, n_scans, n_zaccepts, n_zattempts)
     best_canon = _canonicalize(best_labels)
     return (;
-        partition          = best_canon,
-        expected_loss      = best_eloss,
-        n_clusters         = maximum(best_canon),
-        n_runs             = n_runs,
-        n_scans            = n_scans,
-        n_zealous_accepts  = n_zaccepts,
+        partition = best_canon,
+        expected_loss = best_eloss,
+        n_clusters = maximum(best_canon),
+        n_runs = n_runs,
+        n_scans = n_scans,
+        n_zealous_accepts = n_zaccepts,
         n_zealous_attempts = n_zattempts,
     )
 end
@@ -896,7 +824,6 @@ function _salso_search(
     loss::VILoss;
     n_runs::Int,
     max_zealous_attempts::Int,
-    max_n_clusters::Int,   # accepted for signature parity; the cap warning uses K_max
     K_max::Int,
     prob_sequential_allocation::Float64,
     max_scans::Int,
@@ -934,7 +861,8 @@ function _salso_search(
         n_scans = _salso_sweeten!(_vi_sweeten_step, state, state.labels, n, max_scans, rng)
 
         # Zealous updates
-        n_zaccepts, n_zattempts, n_zscans = _salso_zealous_vi!(state, max_zealous_attempts, max_scans, rng)
+        n_zaccepts, n_zattempts, n_zscans =
+            _salso_zealous_vi!(state, max_zealous_attempts, max_scans, rng)
 
         eloss = _vi_full_loss(state)
         if eloss < best_eloss
@@ -950,7 +878,14 @@ function _salso_search(
         "no SALSO run completed (n_runs = $(n_runs), seconds = $(seconds)); " *
         "raise the run count or the time budget.",
     )
-    res = _salso_result(best_labels, best_eloss, actual_n_runs, best_scans, best_zaccepts, best_zattempts)
+    res = _salso_result(
+        best_labels,
+        best_eloss,
+        actual_n_runs,
+        best_scans,
+        best_zaccepts,
+        best_zattempts,
+    )
     if res.n_clusters ≥ K_max
         @warn "SALSO estimate hit the cluster cap (n_clusters = $(res.n_clusters), " *
               "K_max = $K_max). The optimum may lie outside the searched " *
@@ -977,14 +912,14 @@ function _check_salso_kwargs!(;
     n_runs > 0 || throw(ArgumentError("n_runs must be > 0, got $n_runs"))
     max_zealous_attempts ≥ 0 ||
         throw(ArgumentError("max_zealous_attempts must be ≥ 0, got $max_zealous_attempts"))
-    max_n_clusters ≥ 0 ||
-        throw(ArgumentError("max_n_clusters must be ≥ 0, got $max_n_clusters"))
+    max_n_clusters ≥ 0 || throw(ArgumentError("max_n_clusters must be ≥ 0, got $max_n_clusters"))
     max_scans > 0 || throw(ArgumentError("max_scans must be > 0, got $max_scans"))
     seconds > 0 || throw(ArgumentError("seconds must be > 0, got $seconds"))
-    0 ≤ prob_sequential_allocation ≤ 1 ||
-        throw(ArgumentError(
+    0 ≤ prob_sequential_allocation ≤ 1 || throw(
+        ArgumentError(
             "prob_sequential_allocation must be in [0, 1], got $prob_sequential_allocation",
-        ))
+        ),
+    )
     return nothing
 end
 
@@ -1026,8 +961,11 @@ function salso(
     )
 
     _check_salso_kwargs!(;
-        n_runs = n_runs, max_zealous_attempts = max_zealous_attempts,
-        max_n_clusters = max_n_clusters, max_scans = max_scans, seconds = seconds,
+        n_runs = n_runs,
+        max_zealous_attempts = max_zealous_attempts,
+        max_n_clusters = max_n_clusters,
+        max_scans = max_scans,
+        seconds = seconds,
         prob_sequential_allocation = prob_sequential_allocation,
     )
     # the drivers below are typed, and integers of any width (or e.g. `1 // 2`)
@@ -1053,7 +991,6 @@ function salso(
         loss;
         n_runs = n_runs,
         max_zealous_attempts = max_zealous_attempts,
-        max_n_clusters = max_n_clusters,
         K_max = K_max,
         prob_sequential_allocation = prob_sequential_allocation,
         max_scans = max_scans,
@@ -1062,13 +999,12 @@ function salso(
     )
 end
 
-"""Binder search driver: O(n) `_binder_delta` moves on the precomputed PSM."""
+"""Binder search driver: O(n) per-item moves on the precomputed PSM."""
 function _salso_search(
     draws::Matrix{Int},
     loss::BinderLoss;
     n_runs::Int,
     max_zealous_attempts::Int,
-    max_n_clusters::Int,
     K_max::Int,
     prob_sequential_allocation::Float64,
     max_scans::Int,
@@ -1077,7 +1013,7 @@ function _salso_search(
 )
     n = size(draws, 2)
     psm = compute_psm(draws)
-    search = _BinderSearch(psm, draws, loss, K_max)
+    search = _BinderSearch(psm, loss, K_max)
 
     best_labels = collect(1:n)
     best_eloss = Inf
@@ -1095,14 +1031,14 @@ function _salso_search(
         end
         actual_n_runs += 1
 
-        labels = _salso_init(n, K_max, psm, draws, loss, prob_sequential_allocation, rng)
+        labels = _binder_init(n, K_max, psm, loss, prob_sequential_allocation, rng)
 
         n_scans = _salso_sweeten!(_binder_sweeten_step, search, labels, n, max_scans, rng)
 
         labels, n_zaccepts, n_zattempts, n_zscans =
             _salso_zealous_binder!(labels, search, max_zealous_attempts, max_scans, rng)
 
-        eloss = _eloss(labels, psm, draws, loss)
+        eloss = expected_loss(labels, psm, loss)
         if eloss < best_eloss
             best_eloss = eloss
             best_labels = copy(labels)
@@ -1118,16 +1054,23 @@ function _salso_search(
         "no SALSO run completed (n_runs = $(n_runs), seconds = $(seconds)); " *
         "raise the run count or the time budget.",
     )
-    res = _salso_result(best_labels, best_eloss, actual_n_runs, best_scans, best_zaccepts, best_zattempts)
-    if max_n_clusters > 0 && res.n_clusters ≥ min(max_n_clusters, n)
+    res = _salso_result(
+        best_labels,
+        best_eloss,
+        actual_n_runs,
+        best_scans,
+        best_zaccepts,
+        best_zattempts,
+    )
+    if res.n_clusters ≥ K_max
         @warn "SALSO estimate hit the cluster cap (n_clusters = $(res.n_clusters), " *
-              "max_n_clusters = $max_n_clusters). The optimum may lie outside " *
+              "K_max = $K_max). The optimum may lie outside " *
               "the searched region; raise max_n_clusters to check."
     end
     return res
 end
 
-# ─── Result type ───
+# ─── Result type ──────────────────────────────────────────────────────────────
 
 """
     SALSOResult
@@ -1135,7 +1078,15 @@ end
 Result of `salso`: `partition`, `expected_loss`, `n_clusters`, `n_runs`, `n_scans`,
 `n_zealous_accepts`, `n_zealous_attempts`."""
 SALSOResult = NamedTuple{
-    (:partition, :expected_loss, :n_clusters, :n_runs, :n_scans, :n_zealous_accepts, :n_zealous_attempts),
+    (
+        :partition,
+        :expected_loss,
+        :n_clusters,
+        :n_runs,
+        :n_scans,
+        :n_zealous_accepts,
+        :n_zealous_attempts,
+    ),
     Tuple{Vector{Int},Float64,Int,Int,Int,Int,Int},
 }
 
@@ -1147,13 +1098,13 @@ Base.show(io::IO, r::SALSOResult) = print(
     "zealous=$(r.n_zealous_accepts)/$(r.n_zealous_attempts))",
 )
 
-# ─── Internal helpers ───
+# ─── Internal helpers ─────────────────────────────────────────────────────────
 
 # ─── Canonicalisation scratch ─────────────────────────────────────────────────
 
-# `_canonicalize` runs once per draw in the PSM and VI paths, so it must not
-# allocate: the scratch holds the label → id map, the output buffer and a
-# generation counter, which lets the map be reused without clearing it.
+# `_canonicalize!` runs once per draw in the VI path and the capacity scan, so
+# it must not allocate: the scratch holds the label → id map, the output buffer
+# and a generation counter, which lets the map be reused without clearing it.
 #
 # The map is indexed by `label - lo + 1`, where `lo` is the smallest label of
 # the call.  The previous version indexed it by the raw label, so a negative
@@ -1246,23 +1197,17 @@ function _canonicalize(labels::AbstractVector{Int})
     return copy(_canonicalize!(sc, labels))
 end
 
-"""Compute expected loss for current labels."""
-function _eloss(labels::Vector{Int}, psm::Union{Matrix{Float64},Nothing}, draws::Matrix{Int}, loss::SALSOLoss)
-    return loss isa BinderLoss ? expected_loss(labels, psm, loss) : expected_loss(labels, draws, loss)
-end
-
-"""Initialize labels for SALSO."""
-function _salso_init(
+"""Initialize labels for the Binder search."""
+function _binder_init(
     n::Int,
     K_max::Int,
-    psm::Union{Matrix{Float64},Nothing},
-    draws::Matrix{Int},
-    loss::SALSOLoss,
+    psm::Matrix{Float64},
+    loss::BinderLoss,
     prob_seq_alloc::Float64,
     rng,
 )
     if rand(rng) < prob_seq_alloc
-        return _sequential_allocation(n, K_max, psm, draws, loss, rng)
+        return _binder_sequential_allocation(n, K_max, psm, loss, rng)
     else
         labels = zeros(Int, n)
         for i = 1:n
@@ -1276,7 +1221,7 @@ end
     _binder_best_placement(labels, i, psm, loss, K_max, active_labels, max_label)
 
 Cluster for the not-yet-assigned item `i` in the sequential-allocation initialiser:
-the candidate minimising `_binder_delta` relative to the unassigned state, with
+the candidate minimising the Binder delta relative to the unassigned state, with
 `max_label + 1` (a fresh cluster) as the fallback while fewer than `K_max` clusters
 are in use."""
 function _binder_best_placement(
@@ -1307,7 +1252,14 @@ function _binder_best_placement(
     return best_k
 end
 
-function _sequential_allocation(n::Int, K_max::Int, psm::Matrix{Float64}, draws::Matrix{Int}, loss::BinderLoss, rng)
+"""Sequential allocation for the Binder search."""
+function _binder_sequential_allocation(
+    n::Int,
+    K_max::Int,
+    psm::Matrix{Float64},
+    loss::BinderLoss,
+    rng,
+)
     labels = zeros(Int, n)
     order = randperm(rng, n)
 
@@ -1326,56 +1278,8 @@ function _sequential_allocation(n::Int, K_max::Int, psm::Matrix{Float64}, draws:
     return labels
 end
 
-"""Sequential allocation: place items one at a time into the best cluster."""
-function _sequential_allocation(
-    n::Int,
-    K_max::Int,
-    psm::Union{Matrix{Float64},Nothing},
-    draws::Matrix{Int},
-    loss::SALSOLoss,
-    rng,
-)
-
-    labels = zeros(Int, n)
-    order = randperm(rng, n)
-
-    labels[order[1]] = 1
-    active_labels = Set([1])  # track which cluster labels are in use
-    max_label = 1
-
-    @inbounds for idx = 2:n
-        i = order[idx]
-        best_k = 1
-        best_eloss = Inf
-
-        for k in active_labels
-            labels[i] = k
-            eloss = _eloss(labels, psm, draws, loss)
-            if eloss < best_eloss
-                best_eloss = eloss
-                best_k = k
-            end
-        end
-
-        if length(active_labels) < K_max
-            labels[i] = max_label + 1
-            eloss = _eloss(labels, psm, draws, loss)
-            if eloss < best_eloss
-                best_eloss = eloss
-                best_k = max_label + 1
-            end
-        end
-
-        labels[i] = best_k
-        push!(active_labels, best_k)
-        max_label = max(max_label, best_k)
-    end
-
-    return labels
-end
-
-"""Try to move item i to a better cluster (sweetening scan, Binder fast path)."""
-function _salso_move_item!(labels, i, psm, draws, loss::BinderLoss, K_max)
+"""Try to move item `i` to a better cluster (sweetening scan)."""
+function _binder_move_item!(labels, i, psm, loss::BinderLoss, K_max)
     from_k = @inbounds labels[i]
     # Candidates: labels 1:K_current (an empty one acts as a fresh cluster) and
     # K_current+1 while the ceiling allows.
@@ -1399,61 +1303,17 @@ function _salso_move_item!(labels, i, psm, draws, loss::BinderLoss, K_max)
     return false
 end
 
-"""Try to move item i to a better cluster (sweetening scan, VI full recomputation)."""
-function _salso_move_item!(labels, i, psm, draws, loss::VILoss, K_max)
-    from_k = labels[i]
-    best_k = from_k
-
-    current_eloss = _eloss(labels, psm, draws, loss)
-    best_eloss = current_eloss
-    old_label = labels[i]
-
-    @inbounds for k = 1:maximum(labels)
-        k == from_k && continue
-        labels[i] = k
-        eloss = _eloss(labels, psm, draws, loss)
-        if eloss < best_eloss
-            best_eloss = eloss
-            best_k = k
-        end
-    end
-
-    K_current = maximum(labels)
-    if K_current < K_max
-        @inbounds labels[i] = K_current + 1
-        eloss = _eloss(labels, psm, draws, loss)
-        if eloss < best_eloss
-            best_eloss = eloss
-            best_k = K_current + 1
-        end
-    end
-
-    @inbounds begin
-        labels[i] = old_label  # restore before branching
-
-        if best_k != from_k
-            labels[i] = best_k
-            return true
-        else
-            labels[i] = from_k
-            return false
-        end
-    end
-end
-
 """
-    _salso_best_move!(labels, i, psm, draws, loss::BinderLoss, K_max, rng)
+    _binder_best_move!(labels, i, psm, loss, K_max)
 
-Binder fast path of the zealous reallocation for item `i`, which arrives unassigned
-(`labels[i] == 0`): one pass over row `i` scores every candidate cluster."""
-function _salso_best_move!(
+Zealous reallocation for item `i`, which arrives unassigned (`labels[i] == 0`):
+one pass over row `i` scores every candidate cluster."""
+function _binder_best_move!(
     labels::Vector{Int},
     i::Int,
     psm::Matrix{Float64},
-    draws::Matrix{Int},
     loss::BinderLoss,
     K_max::Int,
-    rng,
 )
     best_k = 1
     best_delta = Inf
@@ -1479,38 +1339,4 @@ function _salso_best_move!(
 
     @inbounds labels[i] = best_k
     return nothing
-end
-
-"""Place item i into the best cluster label (for zealous reallocation)."""
-function _salso_best_move!(labels, i, psm, draws, loss, K_max, rng)
-    best_k = 1
-    best_eloss = Inf
-
-    candidates = unique(labels)
-    candidates = filter(x -> x > 0, candidates)
-    K_current = length(candidates)
-
-    for k in candidates
-        @inbounds labels[i] = k
-        eloss = _eloss(labels, psm, draws, loss)
-        if eloss < best_eloss
-            best_eloss = eloss
-            best_k = k
-        end
-    end
-
-    if K_current < K_max
-        # maximum(labels)+1 (not K_current+1): labels can be non-contiguous
-        # here, and the new-cluster candidate must not collide with an
-        # existing cluster label
-        new_k = maximum(labels) + 1
-        @inbounds labels[i] = new_k
-        eloss = _eloss(labels, psm, draws, loss)
-        if eloss < best_eloss
-            best_eloss = eloss
-            best_k = new_k
-        end
-    end
-
-    @inbounds labels[i] = best_k
 end

@@ -16,16 +16,21 @@ using LinearAlgebra: diag
 using Random
 using SALSO
 using SALSO:
-    _canonicalize, _binder_delta, _VIState, _vi_reset!, _vi_assign!, _vi_full_loss,
-    _vi_best_target, _binder_move_deltas, expected_loss
+    _canonicalize,
+    _VIState,
+    _vi_reset!,
+    _vi_assign!,
+    _vi_full_loss,
+    _vi_best_target,
+    _binder_move_deltas,
+    expected_loss,
+    _psm_accumulate_rows!,
+    _psm_row_blocks
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# Independent reference implementations
-# ═══════════════════════════════════════════════════════════════════════════════
+# ─── Independent reference implementations ────────────────────────────────────
 
 """Count how often each label occurs."""
-countmap(labels) =
-    foldl((d, l) -> (d[l] = get(d, l, 0) + 1; d), labels; init = Dict{Int,Int}())
+countmap(labels) = foldl((d, l) -> (d[l] = get(d, l, 0) + 1; d), labels; init = Dict{Int,Int}())
 
 """PSM by visiting every pair of every draw (the obvious O(B·n²) way)."""
 function naive_psm(draws::Matrix{Int})
@@ -128,11 +133,7 @@ function entropy_vi(labels::Vector{Int}, draws::Matrix{Int}, a::Float64)
     return a * entropy_bits(est) + (2 - a) * E_H - 2 * E_I
 end
 
-"""
-The pre-rewrite `_binder_delta`: one branch per item, skipping item `i` and every
-unassigned item.  Kept as the reference for the unassigned case, where the
-branchless form once treated label 0 as a cluster.
-"""
+"""Independent Binder-delta reference, with one branch per item."""
 function delta_reference(labels, psm, i, from_k, to_k, loss::BinderLoss)
     c = loss.two_minus_a
     delta = 0.0
@@ -170,9 +171,7 @@ function all_partitions(n::Int)
     return out
 end
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# 1. Pairwise similarity matrix
-# ═══════════════════════════════════════════════════════════════════════════════
+# ─── 1. Pairwise similarity matrix ────────────────────────────────────────────
 
 @testset "pairwise similarity matrix" begin
     rng = MersenneTwister(1)
@@ -189,11 +188,29 @@ end
     draws = rand(MersenneTwister(2), 1:4, 15, 25)
     @test compute_psm(ones(Int, 5, 25)) == ones(Float64, 25, 25)
     @test compute_psm(zeros(Int, 0, 25)) == zeros(Float64, 25, 25)
+
+    # Exercise the row-block accumulation directly: normal `Pkg.test()` runs may
+    # have only one Julia thread and would otherwise never enter this path.
+    draws = rand(MersenneTwister(3), 1:6, 17, 73)
+    lo, hi = extrema(draws)
+    off = 1 - lo
+    K_b = Int(hi) + off
+    for nworkers = 1:8
+        blocks = _psm_row_blocks(size(draws, 2), nworkers)
+        covered = falses(size(draws, 2))
+        psm = zeros(Float64, size(draws, 2), size(draws, 2))
+        for (r0, r1) in blocks
+            @test 1 <= r0 <= r1 <= size(draws, 2)
+            @test !any(@view covered[r0:r1])
+            covered[r0:r1] .= true
+            _psm_accumulate_rows!(psm, draws, off, K_b, r0, r1)
+        end
+        @test all(covered)
+        @test SALSO._psm_normalize!(psm, size(draws, 2), size(draws, 1)) ≈ naive_psm(draws)
+    end
 end
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# 2. Expected losses
-# ═══════════════════════════════════════════════════════════════════════════════
+# ─── 2. Expected losses ───────────────────────────────────────────────────────
 
 @testset "expected Binder loss" begin
     rng = MersenneTwister(3)
@@ -204,10 +221,11 @@ end
         got = expected_loss(labels, psm, BinderLoss(a))
         # the PSM path, the counts path and the raw pairwise sum agree
         @test got ≈ counts_binder(labels, draws, a) atol = 1e-12
-        pairwise = 2 * sum(
-            labels[i] == labels[j] ? (2 - a) * (1 - psm[i, j]) : a * psm[i, j] for
-            i = 1:n for j = (i+1):n
-        ) / n^2
+        pairwise =
+            2 * sum(
+                labels[i] == labels[j] ? (2 - a) * (1 - psm[i, j]) : a * psm[i, j] for i = 1:n for
+                j = (i+1):n
+            ) / n^2
         @test got ≈ pairwise atol = 1e-12
         @test expected_loss(labels, draws, BinderLoss(a)) ≈ got atol = 1e-12
     end
@@ -219,8 +237,8 @@ end
     @test expected_loss([1, 1, 1, 1], psm, BinderLoss(2.0)) ≈ 0.0 atol = 1e-14
     # items labelled 0 are unassigned and skipped: only the pair (1, 2) counts
     # here, and its expected cost is 2·(2 - a)·(1 - psm[1, 2]) / n²
-    @test expected_loss([1, 1, 0, 0], psm, BinderLoss(1.0)) ≈
-          2 * (2 - 1.0) * (1 - psm[1, 2]) / 4^2 atol = 1e-14
+    expected = 2 * (2 - 1.0) * (1 - psm[1, 2]) / 4^2
+    @test expected_loss([1, 1, 0, 0], psm, BinderLoss(1.0)) ≈ expected atol = 1e-14
     @test BinderLoss(1.0).two_minus_a == 1.0
     @test_throws AssertionError BinderLoss(2.5)
 end
@@ -230,8 +248,7 @@ end
     for (B, n, K) in [(5, 10, 3), (120, 50, 5)], a in (0.0, 0.5, 1.0, 2.0)
         draws = rand(rng, 1:K, B, n)
         labels = rand(rng, 1:K, n)
-        @test expected_loss(labels, draws, VILoss(a)) ≈ entropy_vi(labels, draws, a) atol =
-            1e-12
+        @test expected_loss(labels, draws, VILoss(a)) ≈ entropy_vi(labels, draws, a) atol = 1e-12
     end
     # identical partitions cost nothing
     draws = repeat([1 1 2 2 3], 9, 1)
@@ -240,9 +257,7 @@ end
     @test_throws AssertionError VILoss(-0.1)
 end
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# 3. Incremental state and deltas
-# ═══════════════════════════════════════════════════════════════════════════════
+# ─── 3. Incremental state and deltas ──────────────────────────────────────────
 
 @testset "incremental VI state" begin
     rng = MersenneTwister(5)
@@ -296,22 +311,21 @@ end
         labels = rand(rng, 1:3, n)
         i = rand(rng, 1:n)
         from_k = labels[i]
-        for to_k in [1:4; maximum(labels)+1]
+        for to_k in [1:4; maximum(labels) + 1]
             to_k == from_k && continue
             before = expected_loss(labels, psm, loss)
             moved = copy(labels)
             moved[i] = to_k
             after = expected_loss(moved, psm, loss)
-            @test _binder_delta(labels, psm, i, from_k, to_k, loss) ≈ after - before atol =
-                1e-12
+            @test delta_reference(labels, psm, i, from_k, to_k, loss) ≈ after - before atol = 1e-12
         end
-        @test _binder_delta(labels, psm, i, from_k, from_k, loss) == 0.0
+        @test delta_reference(labels, psm, i, from_k, from_k, loss) == 0.0
         # one row pass must give every candidate the same delta as the single
         # call (up to summation order), for the assigned case ...
         hi = maximum(labels) + 1
         deltas = _binder_move_deltas(labels, psm, i, from_k, hi, loss)
         for k = 1:hi
-            @test deltas[k] ≈ _binder_delta(labels, psm, i, from_k, k, loss) atol = 1e-12
+            @test deltas[k] ≈ delta_reference(labels, psm, i, from_k, k, loss) atol = 1e-12
         end
         # ... and for the unassigned case, where item i is one of several items
         # labelled 0: those must not be treated as a cluster (a regression that
@@ -324,18 +338,14 @@ end
             i2 = findfirst(==(0), unassigned)
             hi2 = maximum(unassigned) + 1
             deltas0 = _binder_move_deltas(unassigned, psm, i2, 0, hi2, loss)
-            reference = [
-                delta_reference(unassigned, psm, i2, 0, k, loss) for k = 1:hi2
-            ]
+            reference = [delta_reference(unassigned, psm, i2, 0, k, loss) for k = 1:hi2]
             @test deltas0 ≈ reference atol = 1e-12
         end
     end
 end
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# 4. Search
-# ═══════════════════════════════════════════════════════════════════════════════
+# ─── 4. Search ────────────────────────────────────────────────────────────────
 
 """A small, noisy draw matrix used by the brute-force and compatibility tests."""
 function small_instance(seed::Int, n::Int, B::Int)
@@ -392,25 +402,14 @@ end
     @test res.n_runs == 3
     @test 0 <= res.n_zealous_accepts <= res.n_zealous_attempts
     @test res.n_scans >= 1
-    @test res.expected_loss ≈
-          expected_loss(res.partition, compute_psm(draws), BinderLoss(1.0)) atol = 1e-12
+    expected = expected_loss(res.partition, compute_psm(draws), BinderLoss(1.0))
+    @test res.expected_loss ≈ expected atol = 1e-12
     @test occursin("SALSOResult", sprint(show, res))
-    res1 = salso(
-        draws;
-        loss = VILoss(1.0),
-        n_runs = 1,
-        seconds = 100.0,
-        rng = MersenneTwister(9),
-    )
+    res1 = salso(draws; loss = VILoss(1.0), n_runs = 1, seconds = 100.0, rng = MersenneTwister(9))
     @test res1.n_runs == 1
     # a search that never starts must not return a garbage result
     @test_throws ArgumentError salso(draws; loss = VILoss(1.0), n_runs = 0)
-    @test_throws ArgumentError salso(
-        draws;
-        loss = VILoss(1.0),
-        n_runs = 2,
-        seconds = -1.0,
-    )
+    @test_throws ArgumentError salso(draws; loss = VILoss(1.0), n_runs = 2, seconds = -1.0)
 end
 
 @testset "boundary items" begin
@@ -426,11 +425,11 @@ end
         before = expected_loss(labels, psm, loss)
         moved = copy(labels)
         moved[i] = to_k
-        @test _binder_delta(labels, psm, i, from_k, to_k, loss) ≈
+        @test delta_reference(labels, psm, i, from_k, to_k, loss) ≈
               expected_loss(moved, psm, loss) - before atol = 1e-12
         deltas = _binder_move_deltas(labels, psm, i, from_k, 4, loss)
         for k = 1:4
-            @test deltas[k] ≈ _binder_delta(labels, psm, i, from_k, k, loss) atol = 1e-12
+            @test deltas[k] ≈ delta_reference(labels, psm, i, from_k, k, loss) atol = 1e-12
         end
     end
 end
@@ -441,12 +440,10 @@ end
     # improving (-2.8e-17) and the sweetening cycle forever.  The scan count must
     # stay small even when the budget is large.
     tiny = permutedims([1 2 1; 2 4 2; 2 3 2; 2 3 1])
-    res = salso(tiny; loss = BinderLoss(1.0), n_runs = 4, max_scans = 500,
-        rng = MersenneTwister(3))
+    res = salso(tiny; loss = BinderLoss(1.0), n_runs = 4, max_scans = 500, rng = MersenneTwister(3))
     @test res.n_scans < 50
     @test isfinite(res.expected_loss)
-    res_vi = salso(tiny; loss = VILoss(1.0), n_runs = 4, max_scans = 500,
-        rng = MersenneTwister(3))
+    res_vi = salso(tiny; loss = VILoss(1.0), n_runs = 4, max_scans = 500, rng = MersenneTwister(3))
     @test res_vi.n_scans < 50
 end
 
@@ -524,22 +521,15 @@ end
 @testset "cluster ceiling" begin
     # two well separated groups of three items
     draws = repeat([1 1 1 2 2 2; 1 1 2 2 2 2; 1 1 1 2 2 2], 20, 1)
-    res1 = salso(
-        draws;
-        loss = VILoss(1.0),
-        n_runs = 4,
-        max_n_clusters = 1,
-        rng = MersenneTwister(13),
-    )
+    res1 =
+        salso(draws; loss = VILoss(1.0), n_runs = 4, max_n_clusters = 1, rng = MersenneTwister(13))
     @test res1.n_clusters == 1
     @test res1.partition == ones(Int, 6)
     res2 = salso(draws; loss = VILoss(1.0), n_runs = 4, rng = MersenneTwister(13))
     @test res2.n_clusters == 2
 end
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# 5. Argument checking
-# ═══════════════════════════════════════════════════════════════════════════════
+# ─── 5. Argument checking ─────────────────────────────────────────────────────
 
 @testset "non-integer labels are rejected" begin
     draws = rand(MersenneTwister(15), 1:4, 30, 10)
@@ -549,7 +539,7 @@ end
     @test_throws ArgumentError salso(Float64.(draws); n_runs = 2)
     @test_throws ArgumentError compute_psm(Float64.(draws))
     # codes (strings, symbols, categorical) are not labels either
-    @test_throws ArgumentError salso([:a :b ; :b :a])
+    @test_throws ArgumentError salso([:a :b; :b :a])
     # also on the metric side, where the labels are plain vectors
     @test_throws ArgumentError ari([1.0, 2.0, 2.0], [1, 2, 2])
     # the message has to say what to do, not just that it failed
@@ -574,21 +564,18 @@ end
     # keyword arithmetic and bounds: invalid numbers are clear errors
     @test_throws ArgumentError salso(draws; loss = VILoss(1.0), n_runs = -1)
     @test_throws ArgumentError salso(draws; loss = VILoss(1.0), max_scans = -1)
-    @test_throws ArgumentError salso(draws; loss = VILoss(1.0),
-        prob_sequential_allocation = 1.5)
+    @test_throws ArgumentError salso(draws; loss = VILoss(1.0), prob_sequential_allocation = 1.5)
     # a zero budget is refused too, with the same error as a negative one
     @test_throws ArgumentError salso(draws; loss = VILoss(1.0), max_scans = 0)
     @test_throws ArgumentError salso(draws; loss = VILoss(1.0), n_runs = 2, seconds = 0.0)
-    @test_throws ArgumentError salso(draws; loss = VILoss(1.0),
-        prob_sequential_allocation = NaN)
+    @test_throws ArgumentError salso(draws; loss = VILoss(1.0), prob_sequential_allocation = NaN)
     @test_throws MethodError salso(draws; nonsense = 1)                       # unknown option
     # empty inputs are refused with a clear message
     @test_throws ArgumentError salso(zeros(Int, 3, 0); loss = VILoss(1.0), n_runs = 2)
     @test_throws ArgumentError salso(zeros(Int, 0, 3); loss = VILoss(1.0), n_runs = 2)
     # but a whole number is not a mistake: `seconds = 10` and narrow integers work
     @test salso(draws; loss = VILoss(1.0), n_runs = 2, seconds = 10) isa SALSOResult
-    @test salso(draws; loss = VILoss(1.0), n_runs = Int32(2), max_scans = Int16(50)) isa
-          SALSOResult
+    @test salso(draws; loss = VILoss(1.0), n_runs = Int32(2), max_scans = Int16(50)) isa SALSOResult
     @test salso(draws; loss = VILoss(1.0), n_runs = 2, prob_sequential_allocation = 1 // 2) isa
           SALSOResult
 end
@@ -625,6 +612,10 @@ end
     @test vi(Int[], Int[]) == 0.0
     @test_throws DimensionMismatch ari([1, 2], [1])
     @test_throws DimensionMismatch vi([1, 2], [1])
+    @test_throws DimensionMismatch binder_loss(Int[], [1])
+    @test_throws DimensionMismatch binder_loss_n_invariant(Int[], [1])
+    @test_throws DimensionMismatch nmi([1, 2], [1])
+    @test_throws DimensionMismatch purity([1, 2], [1])
     # labels need not be 1..K, or even positive
     c1 = [-3, -3, 7, 7]
     c2 = [5, 5, -1, -1]
@@ -642,8 +633,10 @@ end
     @test purity(truth, [1, 2, 1, 2, 3, 3]) == 4 / 6
     @test binder_loss([1, 1, 2], [1, 2, 2]; a = 1.0, b = 1.0) == 2.0
     @test binder_loss_n_invariant([1, 1, 2], [1, 2, 2]; a = 1.0, b = 1.0) ≈ 4 / 9
+    @test binder_loss_n_invariant([1, 1, 2], [1, 2, 2]; a = 1, b = 1) ≈ 4 / 9
     # exported, and it validates labels like everything else
     @test count_cluster([1, 2, 2, 0]) == 2
+    @test count_cluster([-2, -2, 0, 3]) == 2
     @test count_cluster(Int8[1, 1, 2]) == 2
     @test_throws ArgumentError count_cluster([1.0, 2.0])
     # a loss needs the labels and the partition it scores to match
