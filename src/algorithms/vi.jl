@@ -402,11 +402,8 @@ function _salso_search(
         time() - t_start > seconds && break
         actual_n_runs += 1
 
-        if rand(rng) < prob_sequential_allocation
-            _vi_sequential_allocation!(state, rng)
-        else
-            _vi_reset!(state, [rand(rng, 1:K_max) for _ = 1:n])
-        end
+        rand(rng) < prob_sequential_allocation ? _vi_sequential_allocation!(state, rng) :
+        _vi_reset!(state, [rand(rng, 1:K_max) for _ = 1:n])
 
         # Sweetening scans
         n_scans = _salso_sweeten!(_vi_sweeten_step, state, state.labels, n, max_scans, rng)
