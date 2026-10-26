@@ -24,9 +24,16 @@ res.expected_loss    # E[loss], on the R `salso` scale
 ```
 
 Label values are arbitrary integers (`0` means unassigned); non-integer labels
-raise an `ArgumentError` rather than being coerced.  `src/salso.jl` holds the
-algorithm, `src/interface.jl` the argument checking, `src/metric.jl` the pairwise
-comparison metrics.
+raise an `ArgumentError` rather than being coerced.  The implementation is split
+by responsibility:
+
+- `src/algorithms/search.jl` — shared greedy search and public API
+- `src/algorithms/binder.jl` — Binder loss, incremental move score, and search driver
+- `src/algorithms/vi.jl` — VI loss, incremental state, and search driver
+- `src/support/psm.jl` — pairwise similarity matrix
+- `src/support/canonicalization.jl` — cluster-label canonicalisation
+- `src/api/interface.jl` — argument checking
+- `src/api/metric.jl` — pairwise comparison metrics
 """
 module SALSO
 
@@ -38,8 +45,12 @@ export binder_loss, binder_loss_n_invariant, ari, vi, nmi, purity, count_cluster
 using Clustering: randindex, varinfo
 using Random: default_rng, shuffle!, randperm
 
-include("salso.jl")
-include("interface.jl")
-include("metric.jl")
+include("support/canonicalization.jl")
+include("support/psm.jl")
+include("algorithms/search.jl")
+include("algorithms/binder.jl")
+include("algorithms/vi.jl")
+include("api/interface.jl")
+include("api/metric.jl")
 
 end # module SALSO

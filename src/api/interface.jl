@@ -1,4 +1,4 @@
-# Argument checking around `salso.jl`, which is otherwise untouched: labels must
+# Argument checking around the public `salso` methods: labels must
 # be integers (any width), and the mistakes users make - a float or boolean label
 # array, a single draw instead of a B × n matrix, a vector of draws - get a
 # message instead of a MethodError or a silent `Int.()` conversion.
@@ -35,7 +35,7 @@ _as_int_draws(draws::AbstractMatrix) = _label_type_error(draws)
     salso(draws::AbstractMatrix; loss = VILoss(), kwargs...)
 
 Accept any integer label matrix (any integer width, any array wrapper) and hand
-off to the algorithm in `salso.jl`: `invoke` calls that method directly, so a
+off to the algorithm in `algorithms/search.jl`: `invoke` calls that method directly, so a
 non-integer label type produces one clear error instead of a dispatch loop.  A
 `loss` that is not a loss object is caught by the algorithm's own keyword
 signature, which reports the type it expected.
@@ -98,7 +98,7 @@ VILoss(a::Real) = VILoss(Float64(a))
 
 # ─── pairwise metrics ─────────────────────────────────────────────────────────
 #
-# The metrics in `metric.jl` are typed on `Vector{Int}`; accept any integer
+# The metrics in `api/metric.jl` are typed on `Vector{Int}`; accept any integer
 # container, and fail the same way as everywhere else on non-integer labels.
 
 """Validate label vectors and pack them as `Vector{Int}` for the metrics."""

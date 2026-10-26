@@ -2,8 +2,9 @@
 #
 # Pairwise comparison of two partitions: Binder losses, adjusted Rand index,
 # variation of information, normalized mutual information, purity.  The losses
-# SALSO minimises live in `salso.jl`; `BinderLoss` is the N-invariant form with
-# one parameter, while `binder_loss` here is the classical two-weight one.
+# SALSO minimises live in `algorithms/binder.jl` and `algorithms/vi.jl`;
+# `BinderLoss` is the N-invariant form with one parameter, while `binder_loss`
+# here is the classical two-weight one.
 #
 # Everything comes from the contingency table of the two partitions, O(n + K₁K₂)
 # rather than O(n²), and the labels may be any integers.

@@ -1,7 +1,7 @@
 name = "SALSO"
 uuid = "8c95685e-26b3-5587-8d3d-01c077532f33"
 authors = ["Weipeng Huang <weipeng.huang@outlook.com>"]
-version = "0.2.0"
+version = "0.2.5"
 
 [deps]
 Clustering = "aaaa29a8-35af-508c-8bc3-b662a17a0fe5"
