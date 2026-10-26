@@ -461,6 +461,45 @@ end
     @test compute_psm(view(draws, :, :)) == compute_psm(draws)
 end
 
+@testset "arbitrary label values" begin
+    # Labels are arbitrary integers, so negative ones must be handled like any
+    # other: the canonicalisation used to index a lookup table with the raw
+    # label, which read out of bounds for a negative label (and wrote back
+    # into it, corrupting the heap).
+    rng = MersenneTwister(21)
+    for trial = 1:20
+        labs = rand(rng, -5:5, rand(rng, 1:15))
+        # canonical ids follow the order of first appearance, and every 0 (an
+        # unassigned item) gets a cluster of its own
+        expected = Int[]
+        seen = Dict{Int,Int}()
+        nxt = 1
+        for lab in labs
+            if lab == 0
+                push!(expected, nxt)
+                nxt += 1
+            else
+                id = get(seen, lab, 0)
+                if id == 0
+                    id = nxt
+                    nxt += 1
+                    seen[lab] = id
+                end
+                push!(expected, id)
+            end
+        end
+        @test _canonicalize(labs) == expected
+    end
+    # and the searches survive them
+    draws = rand(MersenneTwister(22), 1:3, 8, 12) .* 7 .- 11
+    for loss in (VILoss(1.0), BinderLoss(1.0))
+        res = salso(draws; loss = loss, n_runs = 2, rng = MersenneTwister(23))
+        @test isfinite(res.expected_loss)
+        @test res.partition == _canonicalize(res.partition)
+    end
+    @test compute_psm(draws) == compute_psm(draws .* 7 .- 11)
+end
+
 @testset "golden values (random trajectory)" begin
     # Recorded when the search was moved onto the incremental VI state; they pin
     # the order in which the driver draws from its RNG.  Julia changed the

@@ -23,8 +23,17 @@ function _psm_normalize!(psm::Matrix{Float64}, n::Int, B::Int)
     return psm
 end
 
-# Per-worker PSM buffers are capped so a large n cannot allocate nthreads · n².
-const _PSM_THREAD_BUDGET = 256 * 1024^2
+# The parallel accumulation splits the ROWS of one shared matrix between the
+# workers, so the matrix is allocated once and there is no merge pass (see
+# `compute_psm`).
+#
+# Smallest amount of bookkeeping (draws × items) that is worth handing to
+# threads; below it the hand-off costs more than the work itself.
+const _PSM_PARALLEL_MIN_WORK = 10_000
+
+# Doubles per 64-byte cache line: the row blocks of the parallel accumulation
+# are cut on these boundaries, so that no two workers share a cache line.
+const _PSM_CACHE_LINE = 8
 
 """
 Add the co-occurrence counts of draws `b1:b2` to the lower triangle of `psm`.
@@ -47,18 +56,18 @@ function _psm_accumulate!(psm::Matrix{Float64}, C_mat::Matrix{Int}, b1::Int, b2:
 end
 
 """
-Add ONE draw's co-occurrence counts to the lower triangle of `psm`.  `C` holds
-the draw's labels (bucket index `l + off`); the scratch vectors are caller-owned,
-so a call allocates nothing."""
-function _psm_accumulate_draw!(
-    psm::Matrix{Float64},
-    C::AbstractVector{Int},
-    off::Int,
-    K_b::Int,
+Bucket a draw's labels: `counts[l]` items carry bucket `l`, `starts[l]..starts[l+1]-1`
+is that bucket's slice of `order`, and `order` lists the items grouped by label,
+increasing within a group.  The scratch vectors are caller-owned, so a call
+allocates nothing."""
+function _psm_bucket!(
     counts::Vector{Int},
     starts::Vector{Int},
     cursor::Vector{Int},
     order::Vector{Int},
+    C::AbstractVector{Int},
+    off::Int,
+    K_b::Int,
 )
     n = length(C)
     @inbounds begin
@@ -84,7 +93,26 @@ function _psm_accumulate_draw!(
             order[cursor[l]] = i
             cursor[l] += 1
         end
+    end
+    return nothing
+end
 
+"""
+Add ONE draw's co-occurrence counts to the lower triangle of `psm`.  `C` holds
+the draw's labels (bucket index `l + off`); the scratch vectors are caller-owned,
+so a call allocates nothing."""
+function _psm_accumulate_draw!(
+    psm::Matrix{Float64},
+    C::AbstractVector{Int},
+    off::Int,
+    K_b::Int,
+    counts::Vector{Int},
+    starts::Vector{Int},
+    cursor::Vector{Int},
+    order::Vector{Int},
+)
+    @inbounds begin
+        _psm_bucket!(counts, starts, cursor, order, C, off, K_b)
         for l = 1:K_b
             gl = starts[l]
             gh = starts[l+1] - 1
@@ -100,12 +128,97 @@ function _psm_accumulate_draw!(
 end
 
 """
+Add ONE draw's co-occurrence counts to the rows `r0:r1` of `psm`.
+
+The lower triangle's element `(i, j)` is written only by the worker that owns
+row `i` (a row holds the larger of the two items), so workers with disjoint row
+blocks never touch the same element."""
+function _psm_accumulate_draw_rows!(
+    psm::Matrix{Float64},
+    C::AbstractVector{Int},
+    off::Int,
+    K_b::Int,
+    counts::Vector{Int},
+    starts::Vector{Int},
+    cursor::Vector{Int},
+    order::Vector{Int},
+    r0::Int,
+    r1::Int,
+)
+    @inbounds begin
+        _psm_bucket!(counts, starts, cursor, order, C, off, K_b)
+        for l = 1:K_b
+            gl = starts[l]
+            gh = starts[l+1] - 1
+            for q = (gl+1):gh
+                iq = order[q]
+                (iq < r0 || iq > r1) && continue
+                for p = gl:(q-1)
+                    psm[iq, order[p]] += 1.0
+                end
+            end
+        end
+    end
+    return psm
+end
+
+"""
+Add the co-occurrence counts of all draws to the rows `r0:r1` of `psm`.
+
+Every draw is bucketed again here (O(n) per draw), because the buckets are what
+turn the O(n²) pair count into Σ|bucket|²/2 updates; the redundant work runs in
+parallel and so does not add to the wall time."""
+function _psm_accumulate_rows!(
+    psm::Matrix{Float64},
+    C_mat::Matrix{Int},
+    off::Int,
+    K_b::Int,
+    r0::Int,
+    r1::Int,
+)
+    n = size(C_mat, 2)
+    counts = zeros(Int, K_b + 1)
+    starts = Vector{Int}(undef, K_b + 2)
+    cursor = Vector{Int}(undef, K_b + 1)
+    order  = Vector{Int}(undef, n)
+
+    @inbounds for b = 1:size(C_mat, 1)
+        _psm_accumulate_draw_rows!(psm, @view(C_mat[b, :]), off, K_b, counts, starts, cursor, order, r0, r1)
+    end
+
+    return psm
+end
+
+"""
+Row blocks `r0:r1` of `n` rows for `nworkers` workers.
+
+The blocks are cut on cache-line boundaries (8 doubles): in a column-major matrix
+the rows of a block are 8 bytes apart, so two neighbouring blocks would
+otherwise share the cache lines at their boundary and ping-pong them."""
+function _psm_row_blocks(n::Int, nworkers::Int)
+    blocks = Vector{Tuple{Int,Int}}(undef, nworkers)
+    nlines = cld(n, _PSM_CACHE_LINE)          # lines per column
+    per = cld(nlines, nworkers)
+    @inbounds for w = 1:nworkers
+        l0 = (w - 1) * per
+        l1 = min(w * per, nlines)
+        blocks[w] = (l0 * _PSM_CACHE_LINE + 1, min(l1 * _PSM_CACHE_LINE, n))
+    end
+    return blocks
+end
+
+"""
     compute_psm(C_mat::Matrix{Int}) -> Matrix{Float64}
 
 Pairwise similarity matrix from `B` draws of `n` labels: entry `(i, j)` is the
 fraction of draws in which items `i` and `j` share a label, the diagonal is 1.0.
-Draws are accumulated in parallel chunks when the buffers fit in
-`_PSM_THREAD_BUDGET`."""
+
+The counts are accumulated in parallel by splitting the ROWS of one shared
+matrix between the workers.  Every element of the lower triangle belongs to
+exactly one row, so the workers never write the same element and no merge pass
+is needed — unlike splitting the draws, which cost one n × n buffer per worker
+plus a serial merge, and made the parallel path up to 12x slower than the
+serial one."""
 function compute_psm(C_mat::Matrix{Int})
     B, n = size(C_mat)
     B == 0 && return zeros(n, n)
@@ -114,24 +227,13 @@ function compute_psm(C_mat::Matrix{Int})
     off = 1 - lo                     # bucket index of label `l` is `l + off`
     K_b = Int(hi) + off
 
-    nworkers = min(Threads.nthreads(), max(1, _PSM_THREAD_BUDGET ÷ max(1, n * n * sizeof(Float64))))
-    if nworkers > 1 && B >= 4 * nworkers
-        parts = [zeros(n, n) for _ = 1:nworkers]
-        chunk = cld(B, nworkers)
+    nworkers = min(Threads.nthreads(), cld(n, _PSM_CACHE_LINE))
+    if nworkers > 1 && B * n >= _PSM_PARALLEL_MIN_WORK
+        psm = zeros(n, n)
+        blocks = _psm_row_blocks(n, nworkers)
         Threads.@threads for w = 1:nworkers
-            b1 = (w - 1) * chunk + 1
-            b2 = min(w * chunk, B)
-            b1 <= b2 && _psm_accumulate!(parts[w], C_mat, b1, b2, off, K_b)
-        end
-        psm = parts[1]
-        @inbounds for w = 2:nworkers
-            pw = parts[w]
-            # `i` is the unit-stride direction; the counts are exact integers
-            for j = 1:n
-                @simd for i = 1:n
-                    psm[i, j] += pw[i, j]
-                end
-            end
+            r0, r1 = blocks[w]
+            _psm_accumulate_rows!(psm, C_mat, off, K_b, r0, r1)
         end
     else
         psm = zeros(n, n)
@@ -224,26 +326,9 @@ function expected_loss(labels::Vector{Int}, draws::Matrix{Int}, loss::VILoss)
     canon = _canonicalize(labels)
     K = maximum(canon)
 
-    max_Kb = 0
-    canon_draws = similar(draws)
-    @inbounds for b = 1:B
-        cd = _canonicalize(@view draws[b, :])
-        canon_draws[b, :] = cd
-        max_Kb = max(max_Kb, maximum(cd))
-    end
-
-    counts = zeros(Int, K, max_Kb, B)
     state_counts = zeros(Int, K)
-    draw_marginals = zeros(Int, max_Kb, B)
-
     @inbounds for i = 1:n
-        s = canon[i]
-        state_counts[s] += 1
-        for b = 1:B
-            l = canon_draws[b, i]
-            counts[s, l, b] += 1
-            draw_marginals[l, b] += 1
-        end
+        state_counts[canon[i]] += 1
     end
 
     a = loss.a
@@ -256,16 +341,45 @@ function expected_loss(labels::Vector{Int}, draws::Matrix{Int}, loss::VILoss)
         ns > 0 && (est += two_minus_a * ns * log2(ns))
     end
 
-    # Draw-side terms: a·Σ_l n_l log2 n_l − 2·Σ_{c,l} m log2 m, averaged over draws
+    # Draw-side terms: a·Σ_l n_l log2 n_l − 2·Σ_{c,l} m log2 m, averaged over draws.
+    #
+    # The draws are folded in one at a time: a draw's confusion table is built
+    # in a scratch buffer, added to the running sum and dropped again.  The
+    # previous version kept a `K × K_b × B` table and a copy of every
+    # canonicalised draw, i.e. O(B·K·K_b + B·n) memory; the scratch is
+    # O(K·K_b + n) and the draws are never copied.  The terms are added in the
+    # same order as before (per draw: the marginals, then the joint counts),
+    # so the result is unchanged bit for bit.
+    sc = _CanonScratch()
+    Kb_cap = 0
+    counts = Int[]                 # K × Kb_cap, row s at (s-1)·Kb_cap + l
+    marg = Int[]                   # Kb_cap
     draw_side = 0.0
     @inbounds for b = 1:B
-        for l = 1:max_Kb
-            nl = draw_marginals[l, b]
+        _canonicalize!(sc, @view draws[b, :])
+        ids = sc.out
+        Kb = maximum(ids)          # distinct labels in this draw
+        if Kb > Kb_cap
+            Kb_cap = max(Kb, 2 * Kb_cap, 8)
+            resize!(counts, K * Kb_cap)
+            resize!(marg, Kb_cap)
+        end
+        fill!(counts, 0)
+        fill!(marg, 0)
+        for i = 1:n
+            s = canon[i]
+            l = ids[i]
+            counts[(s-1)*Kb_cap + l] += 1
+            marg[l] += 1
+        end
+        for l = 1:Kb
+            nl = marg[l]
             nl > 0 && (draw_side += a * nl * log2(nl))
         end
         for s = 1:K
-            for l = 1:max_Kb
-                m = counts[s, l, b]
+            base = (s-1) * Kb_cap
+            for l = 1:Kb
+                m = counts[base + l]
                 m > 0 && (draw_side -= 2 * m * log2(m))
             end
         end
@@ -522,7 +636,7 @@ function _vi_surrogate(s::_VIState, i::Int, cand::AbstractVector{Int})
     @inbounds for (idx, t) in enumerate(cand)
         off = (t == c) ? 1 : 0
         acc = (2.0 - s.a) * s.B * s.delta[Int(s.n_of[t])-off+1]
-        @inbounds for b = 1:s.B
+        for b = 1:s.B
             acc -= 2.0 * s.delta[Int(s.conf[t, s.D[b, i], b])-off+1]
         end
         vals[idx] = acc
@@ -591,7 +705,7 @@ function _vi_best_target(s::_VIState, i::Int)
         t = occ[idx]
         off = (t == c) ? 1 : 0
         acc = (2.0 - s.a) * s.B * s.delta[Int(s.n_of[t])-off+1]
-        @inbounds for b = 1:s.B
+        for b = 1:s.B
             acc -= 2.0 * s.delta[Int(s.conf[t, s.D[b, i], b])-off+1]
         end
         vals[idx] = acc
@@ -644,7 +758,7 @@ end
 """VI reallocation step: move item `i` to its best target cluster."""
 @inline function _vi_sweeten_step(s::_VIState, labels, i::Int)
     t = _vi_best_target(s, i)
-    t == labels[i] && return false
+    @inbounds t == labels[i] && return false
     _vi_assign!(s, i, t)
     return true
 end
@@ -701,17 +815,12 @@ function _salso_zealous_vi!(s::_VIState, max_zealous_attempts::Int, max_scans::I
             _vi_assign!(s, i, _vi_best_target(s, i))
         end
         # `conf`/`n_of` are already exact; the rebuild is only for label gaps.
-        if !_vi_is_canonical(s)
-            _vi_reset!(s, s.labels)
-        end
+        _vi_is_canonical(s) || _vi_reset!(s, s.labels)
 
         n_zscans += _salso_sweeten!(_vi_sweeten_step, s, s.labels, s.n, max_scans, rng)
 
-        if _vi_full_loss(s) < eloss_before
-            n_zaccepts += 1
-        else
-            _vi_reset!(s, old_labels)   # undo
-        end
+        _vi_full_loss(s) < eloss_before ?
+            (n_zaccepts += 1) : _vi_reset!(s, old_labels)   # undo
     end
     return n_zaccepts, n_zattempts, n_zscans
 end
@@ -797,8 +906,9 @@ function _salso_search(
     B, n = size(draws)
 
     D = Matrix{Int}(undef, B, n)
+    sc = _CanonScratch()
     @inbounds for b = 1:B
-        D[b, :] = _canonicalize(@view draws[b, :])
+        D[b, :] = _canonicalize!(sc, @view draws[b, :])
     end
     state = _VIState(D, loss.a, K_max)
 
@@ -930,7 +1040,11 @@ function salso(
     prob_sequential_allocation = Float64(prob_sequential_allocation)
 
     if max_n_clusters ≤ 0
-        max_n_clusters = maximum(maximum(_canonicalize(@view draws[b, :])) for b = 1:B)
+        # The largest number of labels seen in a draw, as in the R reference.
+        # The scratch keeps this allocation-free: the buffer is reused for
+        # every draw.
+        sc = _CanonScratch()
+        max_n_clusters = maximum(maximum(_canonicalize!(sc, @view draws[b, :])) for b = 1:B)
     end
     K_max = min(max_n_clusters, n)
 
@@ -1035,51 +1149,101 @@ Base.show(io::IO, r::SALSOResult) = print(
 
 # ─── Internal helpers ───
 
-"""Canonicalize cluster labels to contiguous 1..K."""
-function _canonicalize(labels::AbstractVector{Int})
-    mx = maximum(labels)
-    # Use a Vector lookup table when label space is reasonable (typical case: K << n).
-    # Fall back to Dict for degenerate cases with huge sparse labels.
-    if mx <= 100_000
-        mapping = zeros(Int, max(mx, 1))
-        result = similar(labels)
-        next_label = 1
-        @inbounds for (i, lab) in enumerate(labels)
+# ─── Canonicalisation scratch ─────────────────────────────────────────────────
+
+# `_canonicalize` runs once per draw in the PSM and VI paths, so it must not
+# allocate: the scratch holds the label → id map, the output buffer and a
+# generation counter, which lets the map be reused without clearing it.
+#
+# The map is indexed by `label - lo + 1`, where `lo` is the smallest label of
+# the call.  The previous version indexed it by the raw label, so a negative
+# label read out of bounds (`@inbounds` turned that into silent corruption:
+# wrong canonicalisations, and a segfault once the garbage was written back).
+
+const _CANON_DENSE_MAX = 100_000
+
+mutable struct _CanonScratch
+    ids::Vector{Int}      # label − lo + 1 → canonical id
+    stamps::Vector{Int}   # generation in which `ids` is valid
+    gen::Int              # current generation
+    dict::Dict{Int,Int}   # fallback for widely spread labels
+    out::Vector{Int}      # output buffer
+end
+
+_CanonScratch() = _CanonScratch(Int[], Int[], 0, Dict{Int,Int}(), Int[])
+
+"""
+    _canonicalize!(sc, labels) -> Vector{Int}
+
+Canonicalize `labels` to 1..K in order of first appearance, writing into the
+scratch's buffer.  The buffer is reused between calls, so a caller that keeps
+the result must copy it.  Label 0 means "unassigned" and gets a cluster of its
+own, exactly as in `_canonicalize`."""
+function _canonicalize!(sc::_CanonScratch, labels::AbstractVector{Int})
+    n = length(labels)
+    length(sc.out) == n || resize!(sc.out, n)
+    lo, hi = extrema(labels)
+    span = Int128(hi) - Int128(lo) + 1     # Int128: the label range may not fit in Int
+    sc.gen += 1
+    gen = sc.gen
+    nxt = 1
+    if span <= _CANON_DENSE_MAX
+        # Dense labels: a vector lookup table, reused across calls.  The
+        # stamps say which generation an entry belongs to, so the table never
+        # has to be cleared.
+        if length(sc.ids) < span
+            old = length(sc.stamps)
+            resize!(sc.ids, span)
+            resize!(sc.stamps, span)
+            # `resize!` leaves the new space uninitialised, so the stamps of the
+            # fresh entries have to be cleared: a stale stamp would make the
+            # lookup below believe an id is still current.
+            fill!(view(sc.stamps, old+1:span), 0)
+        end
+        @inbounds for i = 1:n
+            lab = labels[i]
             if lab == 0
                 # Unassigned label from zealous destruction — assign to a new cluster
-                result[i] = next_label
-                next_label += 1
+                sc.out[i] = nxt
+                nxt += 1
                 continue
             end
-            m = mapping[lab]
-            if m == 0
-                mapping[lab] = next_label
-                m = next_label
-                next_label += 1
+            k = Int(lab - lo) + 1
+            if sc.stamps[k] == gen
+                sc.out[i] = sc.ids[k]
+            else
+                sc.stamps[k] = gen
+                sc.ids[k] = nxt
+                sc.out[i] = nxt
+                nxt += 1
             end
-            result[i] = m
         end
-        return result
     else
-        # Sparse labels: label 0 must be handled exactly as in the dense branch,
-        # or the two would give different losses for the same input.
-        mapping = Dict{Int,Int}()
-        result = similar(labels)
-        next_label = 1
-        for (i, lab) in enumerate(labels)
+        # Sparse labels: a hash map, cleared but not reallocated.
+        empty!(sc.dict)
+        @inbounds for i = 1:n
+            lab = labels[i]
             if lab == 0
-                result[i] = next_label
-                next_label += 1
+                sc.out[i] = nxt
+                nxt += 1
                 continue
             end
-            if !haskey(mapping, lab)
-                mapping[lab] = next_label
-                next_label += 1
+            m = get(sc.dict, lab, 0)
+            if m == 0
+                m = nxt
+                nxt += 1
+                sc.dict[lab] = m
             end
-            result[i] = mapping[lab]
+            sc.out[i] = m
         end
-        return result
     end
+    return sc.out
+end
+
+"""Canonicalize cluster labels to contiguous 1..K."""
+function _canonicalize(labels::AbstractVector{Int})
+    sc = _CanonScratch()
+    return copy(_canonicalize!(sc, labels))
 end
 
 """Compute expected loss for current labels."""
@@ -1179,7 +1343,7 @@ function _sequential_allocation(
     active_labels = Set([1])  # track which cluster labels are in use
     max_label = 1
 
-    for idx = 2:n
+    @inbounds for idx = 2:n
         i = order[idx]
         best_k = 1
         best_eloss = Inf
@@ -1244,7 +1408,7 @@ function _salso_move_item!(labels, i, psm, draws, loss::VILoss, K_max)
     best_eloss = current_eloss
     old_label = labels[i]
 
-    for k = 1:maximum(labels)
+    @inbounds for k = 1:maximum(labels)
         k == from_k && continue
         labels[i] = k
         eloss = _eloss(labels, psm, draws, loss)
@@ -1256,21 +1420,24 @@ function _salso_move_item!(labels, i, psm, draws, loss::VILoss, K_max)
 
     K_current = maximum(labels)
     if K_current < K_max
-        labels[i] = K_current + 1
+        @inbounds labels[i] = K_current + 1
         eloss = _eloss(labels, psm, draws, loss)
         if eloss < best_eloss
             best_eloss = eloss
             best_k = K_current + 1
         end
     end
-    labels[i] = old_label  # restore before branching
 
-    if best_k != from_k
-        labels[i] = best_k
-        return true
-    else
-        labels[i] = from_k
-        return false
+    @inbounds begin
+        labels[i] = old_label  # restore before branching
+
+        if best_k != from_k
+            labels[i] = best_k
+            return true
+        else
+            labels[i] = from_k
+            return false
+        end
     end
 end
 
@@ -1324,7 +1491,7 @@ function _salso_best_move!(labels, i, psm, draws, loss, K_max, rng)
     K_current = length(candidates)
 
     for k in candidates
-        labels[i] = k
+        @inbounds labels[i] = k
         eloss = _eloss(labels, psm, draws, loss)
         if eloss < best_eloss
             best_eloss = eloss
@@ -1337,7 +1504,7 @@ function _salso_best_move!(labels, i, psm, draws, loss, K_max, rng)
         # here, and the new-cluster candidate must not collide with an
         # existing cluster label
         new_k = maximum(labels) + 1
-        labels[i] = new_k
+        @inbounds labels[i] = new_k
         eloss = _eloss(labels, psm, draws, loss)
         if eloss < best_eloss
             best_eloss = eloss
@@ -1345,5 +1512,5 @@ function _salso_best_move!(labels, i, psm, draws, loss, K_max, rng)
         end
     end
 
-    labels[i] = best_k
+    @inbounds labels[i] = best_k
 end
