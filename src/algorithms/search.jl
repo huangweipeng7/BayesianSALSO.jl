@@ -92,7 +92,7 @@ function _salso_finish(
     K_max,
 )
     actual_n_runs == 0 && error(
-        "no SALSO run completed (n_runs = $(n_runs), seconds = $(seconds)); " *
+        "no BayesianSALSO run completed (n_runs = $(n_runs), seconds = $(seconds)); " *
         "raise the run count or the time budget.",
     )
     res = _salso_result(
@@ -104,7 +104,7 @@ function _salso_finish(
         best_zattempts,
     )
     if res.n_clusters ≥ K_max
-        @warn "SALSO estimate hit the cluster cap (n_clusters = $(res.n_clusters), " *
+        @warn "BayesianSALSO estimate hit the cluster cap (n_clusters = $(res.n_clusters), " *
               "K_max = $K_max). The optimum may lie outside the searched " *
               "region; raise max_n_clusters to check."
     end

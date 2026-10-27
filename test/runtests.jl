@@ -1,4 +1,4 @@
-# Correctness and regression tests for the SALSO search.
+# Correctness and regression tests for the BayesianSALSO search.
 #
 #   julia --project=. -e 'using Pkg; Pkg.test()'
 #
@@ -14,8 +14,8 @@
 using Test
 using LinearAlgebra: diag
 using Random
-using SALSO
-using SALSO:
+using BayesianSALSO
+using BayesianSALSO:
     _canonicalize,
     _VIState,
     _vi_reset!,
@@ -206,7 +206,11 @@ end
             _psm_accumulate_rows!(psm, draws, off, K_b, r0, r1)
         end
         @test all(covered)
-        @test SALSO._psm_normalize!(psm, size(draws, 2), size(draws, 1)) ≈ naive_psm(draws)
+        @test BayesianSALSO._psm_normalize!(
+            psm,
+            size(draws, 2),
+            size(draws, 1),
+        ) ≈ naive_psm(draws)
     end
 end
 
@@ -591,7 +595,7 @@ end
     # a narrow label vector is converted once, not once for validation and again
     # for the metrics themselves
     narrow = Int32.(mod1.(1:500, 7))
-    pack() = SALSO._metric_labels(narrow)
+    pack() = BayesianSALSO._metric_labels(narrow)
     pack()
     @test (@allocated pack()) < 6000      # one Vector{Int} (4000 B), not two
     @test VILoss(1).a == 1.0

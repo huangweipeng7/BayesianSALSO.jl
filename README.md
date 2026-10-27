@@ -1,4 +1,4 @@
-# SALSO
+# BayesianSALSO
 
 > **Reference paper:** Dahl, D. B., Johnson, D. J., & Müller, P. (2022).
 > *Search Algorithms and Loss Functions for Bayesian Clustering.* Journal of
@@ -17,7 +17,7 @@ loss, and `VILoss(a)`, the (generalized) variation of information.
 
 ```julia
 using Pkg
-Pkg.add(url = "https://github.com/huangweipeng7/salso.git")
+Pkg.add(url = "https://github.com/huangweipeng7/BayesianSALSO.jl.git")
 ```
 
 Julia 1.10 or newer.
@@ -25,7 +25,7 @@ Julia 1.10 or newer.
 ## Use
 
 ```julia
-using SALSO
+using BayesianSALSO
 
 # draws[b, i] is the label of item i in draw b: integers, 0 = in no cluster
 draws = [ 1 2 1 3 3 ;   # draw 1

@@ -1,5 +1,5 @@
 """
-    SALSO
+    BayesianSALSO
 
 Optimal point estimates (and comparison metrics) for Bayesian clustering
 problems, following Dahl, Johnson & Müller (2022), *Search Algorithms and Loss
@@ -11,7 +11,7 @@ loss, under [`BinderLoss(a)`](@ref BinderLoss) or [`VILoss(a)`](@ref VILoss) wit
 `a ∈ [0, 2]`, as in R's `salso`:
 
 ```julia
-using SALSO
+using BayesianSALSO
 
 # `draws[b, i]` is the label of item i in draw b
 draws = [ 1 2 1 3 3 ;   # draw 1
@@ -35,7 +35,7 @@ by responsibility:
 - `src/api/interface.jl` — argument checking
 - `src/api/metric.jl` — pairwise comparison metrics
 """
-module SALSO
+module BayesianSALSO
 
 export SALSOLoss, BinderLoss, VILoss
 export salso, SALSOResult
@@ -53,4 +53,4 @@ include("algorithms/vi.jl")
 include("api/interface.jl")
 include("api/metric.jl")
 
-end # module SALSO
+end # module BayesianSALSO

@@ -1,7 +1,7 @@
-name = "SALSO"
+name = "BayesianSALSO"
 uuid = "8c95685e-26b3-5587-8d3d-01c077532f33"
 authors = ["Weipeng Huang <weipeng.huang@outlook.com>"]
-version = "0.2.5"
+version = "1.0.0"
 
 [deps]
 Clustering = "aaaa29a8-35af-508c-8bc3-b662a17a0fe5"
@@ -9,6 +9,7 @@ Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
 
 [compat]
 Clustering = "0.15"
+Random = "1.10"
 julia = "1.10"
 
 [extras]

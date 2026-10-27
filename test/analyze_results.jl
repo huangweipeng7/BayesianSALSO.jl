@@ -1,5 +1,5 @@
 #!/usr/bin/env julia
-# SALSO point estimate from a CSV of cluster assignments.
+# BayesianSALSO point estimate from a CSV of cluster assignments.
 #
 # The input CSV has one row per observation and one column per MCMC draw:
 #
@@ -33,7 +33,7 @@
 using DelimitedFiles
 using Printf
 using Random
-using SALSO
+using BayesianSALSO
 
 const OPTIONS = Dict(
     "input_file" => "",
@@ -105,7 +105,7 @@ function main(args)
     a = parse(Float64, opts["loss_a"])
     loss = loss_name == "binder" ? BinderLoss(a) : VILoss(a)
 
-    # the file is n × B (rows are observations, columns are draws); SALSO wants
+    # the file is n × B (rows are observations, columns are draws); BayesianSALSO wants
     # the B × n transpose, one row per draw
     labels_by_item =
         read_labels(opts["input_file"], lowercase(opts["header"]) in ("true", "yes", "1"))
