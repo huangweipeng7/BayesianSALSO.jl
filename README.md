@@ -15,6 +15,15 @@ loss, and `VILoss(a)`, the (generalized) variation of information.
 
 ## Install
 
+Once the General registration is merged:
+
+```julia
+using Pkg
+Pkg.add("BayesianSALSO")
+```
+
+Until then, or when working directly from the repository:
+
 ```julia
 using Pkg
 Pkg.add(url = "https://github.com/huangweipeng7/BayesianSALSO.jl.git")
