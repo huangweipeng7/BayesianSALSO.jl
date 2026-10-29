@@ -1,0 +1,24 @@
+name: Register 0.1.0
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/register-0.1.0.yml
+
+permissions:
+  contents: write
+
+jobs:
+  register:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Request registration
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REGISTER_COMMIT: f2ab3509e4a6cd7ed6c3adb0f79d1af1c2d30295
+        run: |
+          gh api --method POST \
+            "repos/${GITHUB_REPOSITORY}/commits/${REGISTER_COMMIT}/comments" \
+            -f body='@JuliaRegistrator register'
