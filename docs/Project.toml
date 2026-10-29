@@ -2,9 +2,6 @@
 BayesianSALSO = "8c95685e-26b3-5587-8d3d-01c077532f33"
 Documenter = "e30172f5-a6a5-5a46-863b-614d45cd2de4"
 
-[sources]
-BayesianSALSO = {path = "/mnt/data/Workspace/Projects/salso"}
-
 [compat]
 BayesianSALSO = "0.1"
 Documenter = "1"
