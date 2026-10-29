@@ -6,6 +6,12 @@
 
 # ─── Loss interface ───────────────────────────────────────────────────────────
 
+"""
+    SALSOLoss
+
+Abstract supertype of the loss objects accepted by [`salso`](@ref): [`BinderLoss`](@ref)
+and [`VILoss`](@ref).
+"""
 abstract type SALSOLoss end
 
 # ─── Result type ──────────────────────────────────────────────────────────────

@@ -6,6 +6,9 @@ Manifest.toml
 # scratch output of the demo script
 test_part.csv
 
+# Documenter output
+docs/build/
+
 # Julia
 *.jl.cov
 *.jl.*.cov
