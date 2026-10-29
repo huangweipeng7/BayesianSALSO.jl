@@ -1,6 +1,7 @@
 # BayesianSALSO
 
 [![Docs](https://img.shields.io/badge/docs-blue.svg)](https://huangweipeng7.github.io/BayesianSALSO.jl/)
+[![Coverage](https://codecov.io/gh/huangweipeng7/BayesianSALSO.jl/branch/main/graph/badge.svg)](https://codecov.io/gh/huangweipeng7/BayesianSALSO.jl)
 
 > **Reference paper:** Dahl, D. B., Johnson, D. J., & Müller, P. (2022).
 > *Search Algorithms and Loss Functions for Bayesian Clustering.* Journal of
